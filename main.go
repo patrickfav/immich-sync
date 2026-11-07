@@ -3,11 +3,13 @@ package main
 import (
 	"bufio"
 	"encoding/json"
+	"errors"
 	"fmt"
 	"io"
 	"log"
 	"net/http"
 	"os"
+	"path/filepath"
 	"strconv"
 	"strings"
 	"time"
@@ -34,7 +36,7 @@ type ImmichAssetAssets struct {
 }
 
 type ImmichAsset struct {
-	Id               string `json:"id"`
+	ID               string `json:"id"`
 	Type             string `json:"type"`
 	OriginalFileName string `json:"originalFileName"`
 	OriginalMimeType string `json:"originalMimeType"`
@@ -43,22 +45,13 @@ type ImmichAsset struct {
 
 type Album struct {
 	AlbumName string `json:"albumName"`
-	Id        string `json:"id"`
-	OwnerId   string `json:"ownerId"`
+	ID        string `json:"id"`
+	OwnerID   string `json:"ownerId"`
 	Assets    []struct {
-		Id               string `json:"id"`
+		ID               string `json:"id"`
 		OriginalFileName string `json:"originalFileName"`
 		OriginalMimeType string `json:"originalMimeType"`
 	} `json:"assets"`
-}
-
-type Takeout struct {
-	Albums []struct {
-		Name   string `json:"name"`
-		Assets []struct {
-			Filename string `json:"filename"`
-		}
-	} `json:"albums"`
 }
 
 type TakeoutFile struct {
@@ -67,19 +60,60 @@ type TakeoutFile struct {
 	PhotoTakenTime string
 }
 
+func readJSONFile(path string, value any) error {
+	body, err := os.ReadFile(path)
+	if err != nil {
+		return err
+	}
+	return json.Unmarshal(body, value)
+}
+
+func getJSONData(path string, method string, payload any) ([]byte, error) {
+	body, err := json.Marshal(payload)
+	if err != nil {
+		return nil, err
+	}
+	return getData(path, method, string(body))
+}
+
+func takeoutFilenameFromMetadata(name string) (string, bool) {
+	for _, suffix := range []string{".supplemental-metadata.json", ".suppl.json"} {
+		if strings.HasSuffix(name, suffix) {
+			return strings.TrimSuffix(name, suffix), true
+		}
+	}
+
+	// Google may disambiguate duplicate sidecars as .suppl(1).json.
+	if strings.HasSuffix(name, ".json") {
+		base := strings.TrimSuffix(name, ".json")
+		if suffixStart := strings.LastIndex(base, ".suppl("); suffixStart >= 0 && strings.HasSuffix(base, ")") {
+			return base[:suffixStart], true
+		}
+	}
+
+	return "", false
+}
+
 var takeout map[string][]TakeoutFile
 
 var takeoutFiles []TakeoutFile
 
-var apiURL string = ""
-var apiKey string = ""
-var takeoutPath string = ""
+var (
+	apiURL      string
+	apiKey      string
+	takeoutPath string
+)
 
-var supressConfirmation = false
+var (
+	suppressConfirmation = false
+	approveAllAlbums     = false
+	stdinReader          = bufio.NewReader(os.Stdin)
+)
 
-func getData(path string, method string, payload string) (body []byte, err error) {
+var httpClient = &http.Client{}
+
+func getData(path string, method string, payload string) ([]byte, error) {
 	url := apiURL + path
-	client := &http.Client{}
 	req, err := http.NewRequest(method, url, strings.NewReader(payload))
 	if apiKey == "" {
 		fmt.Println("No API key set")
@@ -89,26 +123,29 @@ func getData(path string, method string, payload string) (body []byte, err error
 	if err != nil {
 		return nil, err
 	}
-	req.Header.Add("Content-Type", "application/json")
-	req.Header.Add("Accept", "application/json")
-	req.Header.Add("x-api-key", apiKey)
+	req.Header.Set("Content-Type", "application/json")
+	req.Header.Set("Accept", "application/json")
+	req.Header.Set("x-api-key", apiKey)
 
-	res, err := client.Do(req)
+	res, err := httpClient.Do(req)
 	if err != nil {
 		return nil, err
 	}
 	defer res.Body.Close()
 
-	body, err = io.ReadAll(res.Body)
+	body, err := io.ReadAll(res.Body)
 	if err != nil {
 
 		return nil, err
+	}
+	if res.StatusCode < http.StatusOK || res.StatusCode >= http.StatusMultipleChoices {
+		return nil, fmt.Errorf("Immich API %s %s returned HTTP %s: %s", method, path, res.Status, strings.TrimSpace(string(body)))
 	}
 	return body, nil
 }
 
 func YesNoPrompt(label string, def bool, required bool) bool {
-	if !required && supressConfirmation {
+	if !required && suppressConfirmation {
 		return true
 	}
 	choices := "Y/n"
@@ -116,12 +153,11 @@ func YesNoPrompt(label string, def bool, required bool) bool {
 		choices = "y/N"
 	}
 
-	r := bufio.NewReader(os.Stdin)
 	var s string
 
 	for {
 		fmt.Fprintf(os.Stderr, "%s (%s) ", label, choices)
-		s, _ = r.ReadString('\n')
+		s, _ = stdinReader.ReadString('\n')
 		s = strings.TrimSpace(s)
 		if s == "" {
 			return def
@@ -136,8 +172,27 @@ func YesNoPrompt(label string, def bool, required bool) bool {
 	}
 }
 
+func AlbumConfirmation(label string) (confirm bool, approveAll bool) {
+	if suppressConfirmation {
+		return true, false
+	}
+
+	for {
+		fmt.Fprintf(os.Stderr, "%s (Y/n/A) ", label)
+		s, _ := stdinReader.ReadString('\n')
+		s = strings.ToLower(strings.TrimSpace(s))
+		switch s {
+		case "", "y", "yes":
+			return true, false
+		case "a", "all":
+			return true, true
+		case "n", "no":
+			return false, false
+		}
+	}
+}
+
 func UserInput(label string, def string, required bool) string {
-	r := bufio.NewReader(os.Stdin)
 	var s string
 
 	for {
@@ -146,7 +201,7 @@ func UserInput(label string, def string, required bool) string {
 		} else {
 			fmt.Fprintf(os.Stderr, "%s: ", label)
 		}
-		s, _ = r.ReadString('\n')
+		s, _ = stdinReader.ReadString('\n')
 		s = strings.TrimSpace(s)
 		if s == "" {
 			if def != "" {
@@ -169,8 +224,10 @@ func getAlbums() (albums []Album, err error) {
 		fmt.Println(err)
 		return nil, err
 	}
-	json.Unmarshal(body, &albums)
-	fmt.Printf("%s\n", fmt.Sprintf("Total albums: %d", len(albums)))
+	if err := json.Unmarshal(body, &albums); err != nil {
+		return nil, fmt.Errorf("invalid albums response: %w", err)
+	}
+	fmt.Printf("Total albums: %d\n", len(albums))
 	return albums, nil
 }
 
@@ -186,22 +243,25 @@ func readFiles(readAll bool) {
 	fmt.Println("Reading takeout albums...")
 	albumsTotal := 0
 	for _, entry := range entries {
-		entryPath := basePath + "/" + entry.Name()
+		entryPath := filepath.Join(basePath, entry.Name())
 		if readAll && entry.IsDir() {
 			readAllDir(entryPath)
-		} else {
-			metadata, err := os.Open(entryPath + "/metadata.json")
-			if err == nil {
-				bytefile, _ := io.ReadAll(metadata)
-				defer metadata.Close()
-				var asset Asset
-				json.Unmarshal(bytefile, &asset)
-				if asset.Title != nil && *asset.Title != "" {
-					albumsTotal++
-					readAlbum(entryPath, *asset.Title)
-				}
+			continue
+		}
+		if !entry.IsDir() {
+			continue
+		}
 
+		var asset Asset
+		if err := readJSONFile(filepath.Join(entryPath, "metadata.json"), &asset); err != nil {
+			if !errors.Is(err, os.ErrNotExist) {
+				fmt.Printf("Could not read album metadata %s: %v\n", entryPath, err)
 			}
+			continue
+		}
+		if asset.Title != nil && *asset.Title != "" {
+			albumsTotal++
+			readAlbum(entryPath, *asset.Title)
 		}
 	}
 	if albumsTotal == 0 {
@@ -226,16 +286,13 @@ func readAlbum(albumPath string, albumTitle string) {
 		if entry.Name() == "metadata.json" || !strings.HasSuffix(entry.Name(), ".json") {
 			continue
 		}
-		file, err := os.Open(albumPath + "/" + entry.Name())
-		if err == nil {
-			bytefile, _ := io.ReadAll(file)
-			defer file.Close()
-			var asset Asset
-			json.Unmarshal(bytefile, &asset)
-			if asset.Title != nil {
-				takeout[albumTitle] = append(takeout[albumTitle], TakeoutFile{Filename: *asset.Title, CreationTime: asset.CreationTime.Timestamp, PhotoTakenTime: asset.PhotoTakenTime.Timestamp})
-			}
-
+		var asset Asset
+		if err := readJSONFile(filepath.Join(albumPath, entry.Name()), &asset); err != nil {
+			fmt.Printf("Could not read photo metadata %s: %v\n", entry.Name(), err)
+			continue
+		}
+		if asset.Title != nil && *asset.Title != "" {
+			takeout[albumTitle] = append(takeout[albumTitle], TakeoutFile{Filename: *asset.Title, CreationTime: asset.CreationTime.Timestamp, PhotoTakenTime: asset.PhotoTakenTime.Timestamp})
 		}
 	}
 }
@@ -246,41 +303,42 @@ func readAllDir(path string) {
 		log.Fatal(err)
 	}
 	for _, entry := range entries {
-		entryPath := path + "/" + entry.Name()
+		entryPath := filepath.Join(path, entry.Name())
 		if entry.IsDir() {
 			readAllDir(entryPath)
 		} else {
-			if entry.Name() == "metadata.json" || !strings.HasSuffix(entry.Name(), ".supplemental-metadata.json") {
+			fileName, ok := takeoutFilenameFromMetadata(entry.Name())
+			if !ok {
 				continue
 			}
-			file, err := os.Open(entryPath)
-			if err == nil {
-				bytefile, _ := io.ReadAll(file)
-				defer file.Close()
-				var asset Asset
-				json.Unmarshal(bytefile, &asset)
-				fileName := strings.TrimSuffix(entry.Name(), ".supplemental-metadata.json")
-				if asset.Title != nil && *asset.Title != "" && asset.PhotoTakenTime.Timestamp != "" {
-					takeoutFiles = append(takeoutFiles, TakeoutFile{Filename: fileName, CreationTime: asset.CreationTime.Timestamp, PhotoTakenTime: asset.PhotoTakenTime.Timestamp})
-				}
+			var asset Asset
+			if err := readJSONFile(entryPath, &asset); err != nil {
+				fmt.Printf("Could not read photo metadata %s: %v\n", entryPath, err)
+				continue
+			}
+			if asset.Title != nil && *asset.Title != "" && asset.PhotoTakenTime.Timestamp != "" {
+				takeoutFiles = append(takeoutFiles, TakeoutFile{Filename: fileName, CreationTime: asset.CreationTime.Timestamp, PhotoTakenTime: asset.PhotoTakenTime.Timestamp})
 			}
 		}
 	}
 }
 
 func findAssetByFilename(filename string, createdAfter string, createdBefore string) (asset []ImmichAsset) {
-	var body []byte
-	var err error
-	if createdAfter == "" || createdBefore == "" {
-		body, err = getData("search/metadata", "POST", "{\"originalFileName\": \""+filename+"\"}")
-	} else {
-		body, err = getData("search/metadata", "POST", "{\"originalFileName\": \""+filename+"\", \"takenAfter\": \""+createdAfter+"\", \"takenBefore\": \""+createdBefore+"\"}")
-	}
+	payload := struct {
+		OriginalFileName string `json:"originalFileName"`
+		TakenAfter       string `json:"takenAfter,omitempty"`
+		TakenBefore      string `json:"takenBefore,omitempty"`
+	}{OriginalFileName: filename, TakenAfter: createdAfter, TakenBefore: createdBefore}
+	body, err := getJSONData("search/metadata", "POST", payload)
 	if err != nil {
 		fmt.Println(err)
+		return
 	}
 	var response ImmichAlbumAsset
-	json.Unmarshal(body, &response)
+	if err := json.Unmarshal(body, &response); err != nil {
+		fmt.Println("Invalid Immich search response:", err)
+		return
+	}
 	if response.Assets.Total == 0 {
 		// fmt.Println("Asset not found: " + filename)
 		return
@@ -289,13 +347,20 @@ func findAssetByFilename(filename string, createdAfter string, createdBefore str
 }
 
 func findAssetsByDate(date string) (assets []ImmichAsset) {
-	// tm, err := time.Parse(date + "T00:00:00Z", "2006-01-02T15:04:05Z");
-	body, err := getData("search/metadata", "POST", "{\"takenAfter\": \""+date+"T00:00:00Z"+"\", \"takenBefore\": \""+date+"T23:59:59Z"+"\"}")
+	payload := struct {
+		TakenAfter  string `json:"takenAfter"`
+		TakenBefore string `json:"takenBefore"`
+	}{TakenAfter: date + "T00:00:00Z", TakenBefore: date + "T23:59:59Z"}
+	body, err := getJSONData("search/metadata", "POST", payload)
 	if err != nil {
 		fmt.Println(err)
+		return []ImmichAsset{}
 	}
 	var response ImmichAlbumAsset
-	json.Unmarshal(body, &response)
+	if err := json.Unmarshal(body, &response); err != nil {
+		fmt.Println("Invalid Immich search response:", err)
+		return []ImmichAsset{}
+	}
 	if response.Assets.Total == 0 {
 		return []ImmichAsset{}
 	}
@@ -334,11 +399,12 @@ func syncFilesDates() {
 			ok := YesNoPrompt("Are you sure you want to update this file?", false, true)
 			if !ok {
 				continue
-			} else {
-				_, err := getData("assets/"+asset.Id, "PUT", "{\"dateTimeOriginal\": \""+photoTaken+"\"}")
-				if err != nil {
-					fmt.Println(err)
-				}
+			}
+			_, err := getJSONData("assets/"+asset.ID, "PUT", struct {
+				DateTimeOriginal string `json:"dateTimeOriginal"`
+			}{DateTimeOriginal: photoTaken})
+			if err != nil {
+				fmt.Println(err)
 			}
 		} else {
 			fmt.Printf("No update needed for %s\n", file.Filename)
@@ -346,7 +412,7 @@ func syncFilesDates() {
 	}
 }
 
-func SyncFilesByDate(date string) {
+func syncFilesByDate(date string) {
 	fmt.Println("Syncing files by date: " + date)
 	assets := findAssetsByDate(date)
 	if len(assets) == 0 {
@@ -354,7 +420,7 @@ func SyncFilesByDate(date string) {
 		return
 	}
 	fmt.Printf("Found %d assets for date: %s\n", len(assets), date)
-	supressConfirmation = false
+	suppressConfirmation = false
 	for _, asset := range assets {
 		found := false
 		for _, file := range takeoutFiles {
@@ -379,11 +445,12 @@ func SyncFilesByDate(date string) {
 					ok := YesNoPrompt("Are you sure you want to update this file?", false, true)
 					if !ok {
 						continue
-					} else {
-						_, err := getData("assets/"+asset.Id, "PUT", "{\"dateTimeOriginal\": \""+photoTaken+"\"}")
-						if err != nil {
-							fmt.Println(err)
-						}
+					}
+					_, err := getJSONData("assets/"+asset.ID, "PUT", struct {
+						DateTimeOriginal string `json:"dateTimeOriginal"`
+					}{DateTimeOriginal: photoTaken})
+					if err != nil {
+						fmt.Println(err)
 					}
 				} else {
 					fmt.Printf("No update needed for %s\n", file.Filename)
@@ -399,20 +466,26 @@ func SyncFilesByDate(date string) {
 
 func syncAlbum(album Album, files []TakeoutFile, override bool) {
 	fmt.Println("Syncing album: " + album.AlbumName)
-	if !override {
-		ok := YesNoPrompt("Are you sure you want to sync this album?", true, false)
+	if !override && !approveAllAlbums {
+		ok, approveAll := AlbumConfirmation("Are you sure you want to sync this album?")
+		if approveAll {
+			approveAllAlbums = true
+		}
 		if !ok {
 			return
 		}
 	}
-	body, err := getData("albums/"+album.Id, "GET", "")
+	body, err := getData("albums/"+album.ID, "GET", "")
 	if err != nil {
 		fmt.Println(err)
 		return
 	}
 	newAssets := []string{}
 	var immichAlbum Album
-	json.Unmarshal(body, &immichAlbum)
+	if err := json.Unmarshal(body, &immichAlbum); err != nil {
+		fmt.Println("Invalid album response:", err)
+		return
+	}
 	notFound := 0
 	fmt.Print("Searching files ")
 	for _, file := range files {
@@ -428,13 +501,13 @@ func syncAlbum(album Album, files []TakeoutFile, override bool) {
 			createdAfterTimestamp, err1 := strconv.ParseInt(file.PhotoTakenTime, 10, 64)
 			createdBeforeTimestamp, err2 := strconv.ParseInt(file.CreationTime, 10, 64)
 			if err1 != nil || err2 != nil {
-				fmt.Println("Error parsing timestamp:", err)
+				fmt.Println("Error parsing timestamp:", err1, err2)
 				return
 			}
 			tm1 := time.Unix(createdAfterTimestamp, 0)
 			tm2 := time.Unix(createdBeforeTimestamp, 0)
-			createdAfter := tm1.Add(time.Hour * 24 * -1).Format("2006-01-02")
-			createdBefore := tm2.Add(time.Hour * 24 * 1).Format("2006-01-02")
+			createdAfter := tm1.Add(-24 * time.Hour).UTC().Format(time.RFC3339)
+			createdBefore := tm2.Add(24 * time.Hour).UTC().Format(time.RFC3339)
 
 			assets := findAssetByFilename(file.Filename, createdAfter, createdBefore)
 			if len(assets) == 0 {
@@ -442,7 +515,7 @@ func syncAlbum(album Album, files []TakeoutFile, override bool) {
 			}
 			var ids []string
 			for _, asset := range assets {
-				ids = append(ids, asset.Id)
+				ids = append(ids, asset.ID)
 
 			}
 
@@ -452,22 +525,26 @@ func syncAlbum(album Album, files []TakeoutFile, override bool) {
 	}
 	fmt.Println(" Done")
 	if len(newAssets) > 0 {
-		ids, _ := json.Marshal(newAssets)
-		body, err := getData("albums/"+album.Id+"/assets", "PUT", "{\"ids\": "+string(ids)+"}")
+		body, err := getJSONData("albums/"+album.ID+"/assets", "PUT", struct {
+			IDs []string `json:"ids"`
+		}{IDs: newAssets})
 
 		if err != nil {
 			fmt.Println(err)
 			return
 		}
 		var response []struct {
-			Id      string `json:"id"`
+			ID      string `json:"id"`
 			Success bool   `json:"success"`
 		}
-		json.Unmarshal(body, &response)
+		if err := json.Unmarshal(body, &response); err != nil {
+			fmt.Println("Invalid album assets response:", err)
+			return
+		}
 		i := 0
 		for _, r := range response {
 			if !r.Success {
-				fmt.Println("Error syncing asset: " + r.Id)
+				fmt.Println("Error syncing asset: " + r.ID)
 			} else {
 				i++
 			}
@@ -487,50 +564,59 @@ func createAlbum(albumName string, files []TakeoutFile) {
 	if !ok {
 		return
 	}
-	body, err := getData("albums", "POST",
-		"{\"albumName\": \""+albumName+"\"}")
+	body, err := getJSONData("albums", "POST", struct {
+		AlbumName string `json:"albumName"`
+	}{AlbumName: albumName})
 	if err != nil {
 		fmt.Println(err)
 		return
 	}
 	var immichAlbum Album
-	json.Unmarshal(body, &immichAlbum)
-	fmt.Printf("New album created: %s\n", immichAlbum.Id)
+	if err := json.Unmarshal(body, &immichAlbum); err != nil {
+		fmt.Println("Invalid album response:", err)
+		return
+	}
+	fmt.Printf("New album created: %s\n", immichAlbum.ID)
 	syncAlbum(immichAlbum, files, true)
 }
 
 func readConfig() {
-	file, err := os.Open("config.json")
+	bytefile, err := os.ReadFile("config.json")
 	if err == nil {
-		bytefile, _ := io.ReadAll(file)
-		defer file.Close()
 		var config struct {
-			ApiKey      string `json:"apiKey"`
-			ApiURL      string `json:"apiURL"`
+			APIKey      string `json:"apiKey"`
+			APIURL      string `json:"apiURL"`
 			TakeoutPath string `json:"takeoutPath"`
 		}
-		json.Unmarshal(bytefile, &config)
-		apiKey = config.ApiKey
-		apiURL = config.ApiURL
+		if err := json.Unmarshal(bytefile, &config); err != nil {
+			fmt.Println("Invalid config.json:", err)
+			os.Exit(1)
+		}
+		apiKey = config.APIKey
+		apiURL = config.APIURL
 		takeoutPath = config.TakeoutPath
-	} else {
-		fmt.Println("No config file found, trying ENV vars...")
-		apiKey = os.Getenv("IMMICH_API_KEY")
-		apiURL = os.Getenv("IMMICH_API_URL")
-		takeoutPath = os.Getenv("IMMICH_TAKEOUT_PATH")
-		if apiKey == "" {
-			fmt.Println("No IMMICH_API_KEY set")
-			os.Exit(1)
-		}
-		if apiURL == "" {
-			fmt.Println("No IMMICH_API_URL set")
-			os.Exit(1)
-		}
-		if takeoutPath == "" {
-			fmt.Println("No IMMICH_TAKEOUT_PATH set, using current directory")
-			takeoutPath = "."
-		}
+		return
+	}
+	if !errors.Is(err, os.ErrNotExist) {
+		fmt.Println("Could not read config.json:", err)
+		os.Exit(1)
+	}
 
+	fmt.Println("No config file found, trying ENV vars...")
+	apiKey = os.Getenv("IMMICH_API_KEY")
+	apiURL = os.Getenv("IMMICH_API_URL")
+	takeoutPath = os.Getenv("IMMICH_TAKEOUT_PATH")
+	if apiKey == "" {
+		fmt.Println("No IMMICH_API_KEY set")
+		os.Exit(1)
+	}
+	if apiURL == "" {
+		fmt.Println("No IMMICH_API_URL set")
+		os.Exit(1)
+	}
+	if takeoutPath == "" {
+		fmt.Println("No IMMICH_TAKEOUT_PATH set, using current directory")
+		takeoutPath = "."
 	}
 }
 
@@ -538,18 +624,22 @@ func main() {
 	readConfig()
 
 	if len(os.Args) > 1 && os.Args[1] == "-y" {
-		supressConfirmation = true
+		suppressConfirmation = true
 	}
 
 	body, err := getData("users/me", "GET", "")
 	if err != nil {
 		fmt.Println(err)
+		return
 	}
 	var response struct {
-		Id   string `json:"id"`
+		ID   string `json:"id"`
 		Name string `json:"name"`
 	}
-	json.Unmarshal(body, &response)
+	if err := json.Unmarshal(body, &response); err != nil {
+		fmt.Println("Invalid user response:", err)
+		return
+	}
 
 	ok := YesNoPrompt("Are you "+response.Name+"?", false, true)
 	if !ok {
@@ -565,6 +655,10 @@ func main() {
 			return
 		}
 		albums, err := getAlbums()
+		if err != nil {
+			fmt.Println(err)
+			return
+		}
 		for albumName, files := range takeout {
 			foundAlbum := false
 			for _, album := range albums {
@@ -578,10 +672,6 @@ func main() {
 				createAlbum(albumName, files)
 			}
 		}
-		if err != nil {
-			fmt.Println(err)
-		} else {
-		}
 		fmt.Println("Done!")
 	} else {
 		ok = YesNoPrompt("Do you want to sync assets dates?", true, true)
@@ -590,7 +680,7 @@ func main() {
 			fmt.Println("Found total files: " + strconv.Itoa(len(takeoutFiles)))
 			date := UserInput("Enter date to filter files (YYYY-MM-DD) or leave empty to sync all files: ", "", true)
 			if date != "" {
-				SyncFilesByDate(date)
+				syncFilesByDate(date)
 			} else {
 				syncFilesDates()
 			}
