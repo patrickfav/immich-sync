@@ -52,7 +52,8 @@ failing.
 
 When creating a new Immich album, the non-empty Google album description is
 copied to it. Albums with no discovered photo metadata are reported with a
-warning and are not created.
+warning and are not created. Albums whose Takeout files have no matching
+Immich assets are also skipped before album creation.
 
 ## Requirements
 
@@ -184,8 +185,9 @@ Are you sure you want to sync this album? (Y/n/A)
 
 If an album title from Google Photos does not exist in Immich, the program
 offers to create it with the non-empty Google Photos description and then adds
-the matching assets. Albums with no discovered image metadata are skipped and
-are not created.
+the matching assets. The matching search happens before the create request, so
+an album is not created when zero Immich assets match. Albums with no discovered
+image metadata are skipped and are not created.
 
 Albums are processed newest first when their Takeout `metadata.json` includes a
 creation timestamp. Albums without timestamps are processed afterward in

@@ -55,8 +55,9 @@ import missing assets, or delete album members.
   timestamps when available, then lexicographic order for ties or undated
   albums. Never range over the album map directly for sync order.
 - Copy a non-empty Google album description only when creating a new Immich
-  album. Skip empty Takeout albums with a warning; never create an album with
-  no discovered image metadata.
+  album. Skip empty Takeout albums with a warning; resolve matching Immich
+  assets before creating a new album, and never create one when zero assets
+  match.
 
 ## Development workflow
 

@@ -895,33 +895,7 @@ func syncFilesByDate(date string) error {
 	return nil
 }
 
-func syncAlbum(album Album, files []TakeoutFile, override bool) {
-	if !override {
-		section("🖼️", "Album: "+album.AlbumName)
-	}
-	if len(files) == 0 {
-		warning("Album skipped: %s (no images found)", album.AlbumName)
-		return
-	}
-	if !override && !confirmAlbumAction(fmt.Sprintf("Sync %d Takeout images into this album?", len(files))) {
-		warning("Album skipped: %s", album.AlbumName)
-		return
-	}
-	immichAssets, err := getAlbumAssets(album.ID)
-	if err != nil {
-		failure("%v", err)
-		return
-	}
-	existingAssetIDs := make(map[string]struct{}, len(immichAssets))
-	for _, asset := range immichAssets {
-		existingAssetIDs[asset.ID] = struct{}{}
-	}
-	info("Already in album: %d assets", len(existingAssetIDs))
-
-	newAssets := []string{}
-	newAssetIDs := make(map[string]struct{})
-	notFound := 0
-	skipped := 0
+func findAlbumAssetIDs(files []TakeoutFile) ([]string, int, error) {
 	if assetSearchCache == nil {
 		assetSearchCache = make(map[assetSearchQuery][]ImmichAsset)
 	}
@@ -969,13 +943,16 @@ func syncAlbum(album Album, files []TakeoutFile, override bool) {
 		}
 		if err != nil {
 			failure("%v", err)
-			return
+			return nil, 0, err
 		}
 	}
 	if len(uniqueQueries) > len(uncachedQueries) {
 		info("Reused %d cached asset searches", len(uniqueQueries)-len(uncachedQueries))
 	}
 
+	matchedAssetIDs := make([]string, 0)
+	matchedAssetIDsSet := make(map[string]struct{})
+	notFound := 0
 	for _, query := range queries {
 		assets := assetSearchCache[query]
 		if len(assets) == 0 {
@@ -983,60 +960,106 @@ func syncAlbum(album Album, files []TakeoutFile, override bool) {
 			continue
 		}
 		for _, asset := range assets {
-			if _, ok := existingAssetIDs[asset.ID]; ok {
-				skipped++
+			if asset.ID == "" {
 				continue
 			}
-			if _, ok := newAssetIDs[asset.ID]; ok {
+			if _, ok := matchedAssetIDsSet[asset.ID]; ok {
 				continue
 			}
-			newAssetIDs[asset.ID] = struct{}{}
-			newAssets = append(newAssets, asset.ID)
+			matchedAssetIDsSet[asset.ID] = struct{}{}
+			matchedAssetIDs = append(matchedAssetIDs, asset.ID)
 		}
 	}
-	if skipped > 0 {
-		info("Skipped %d assets already present", skipped)
-	}
-	if len(newAssets) > 0 {
-		body, err := getJSONData("albums/"+album.ID+"/assets", http.MethodPut, struct {
-			IDs []string `json:"ids"`
-		}{IDs: newAssets})
+	return matchedAssetIDs, notFound, nil
+}
 
-		if err != nil {
-			failure("%v", err)
-			return
-		}
-		var response []struct {
-			ID      string `json:"id"`
-			Success bool   `json:"success"`
-		}
-		if err := json.Unmarshal(body, &response); err != nil {
-			failure("Invalid album assets response: %v", err)
-			return
-		}
-		i := 0
-		for _, r := range response {
-			if !r.Success {
-				failure("Error syncing asset: %s", r.ID)
-			} else {
-				i++
-			}
-		}
+func addAssetsToAlbum(album Album, assetIDs []string, override bool, notFound int) {
+	if len(assetIDs) == 0 {
 		if override {
-			success("Added %d assets to new album", i)
-		} else {
-			success("Album updated: %s (+%d assets)", album.AlbumName, i)
-		}
-	} else {
-		if override {
-			success("Album created: %s (no matching assets)", album.AlbumName)
+			warning("Album skipped: %s (no matching Immich images; not created)", album.AlbumName)
 		} else {
 			success("Album unchanged: %s", album.AlbumName)
 		}
+		if notFound > 0 {
+			warning("%d assets not found in Immich", notFound)
+		}
+		return
+	}
+
+	body, err := getJSONData("albums/"+album.ID+"/assets", http.MethodPut, struct {
+		IDs []string `json:"ids"`
+	}{IDs: assetIDs})
+
+	if err != nil {
+		failure("%v", err)
+		return
+	}
+	var response []struct {
+		ID      string `json:"id"`
+		Success bool   `json:"success"`
+	}
+	if err := json.Unmarshal(body, &response); err != nil {
+		failure("Invalid album assets response: %v", err)
+		return
+	}
+	i := 0
+	for _, r := range response {
+		if !r.Success {
+			failure("Error syncing asset: %s", r.ID)
+		} else {
+			i++
+		}
+	}
+	if override {
+		success("Added %d assets to new album", i)
+	} else {
+		success("Album updated: %s (+%d assets)", album.AlbumName, i)
 	}
 	if notFound > 0 {
 		warning("%d assets not found in Immich", notFound)
 	}
+}
+
+func syncAlbum(album Album, files []TakeoutFile, override bool) {
+	if !override {
+		section("🖼️", "Album: "+album.AlbumName)
+	}
+	if len(files) == 0 {
+		warning("Album skipped: %s (no images found)", album.AlbumName)
+		return
+	}
+	if !override && !confirmAlbumAction(fmt.Sprintf("Sync %d Takeout images into this album?", len(files))) {
+		warning("Album skipped: %s", album.AlbumName)
+		return
+	}
+	immichAssets, err := getAlbumAssets(album.ID)
+	if err != nil {
+		failure("%v", err)
+		return
+	}
+	existingAssetIDs := make(map[string]struct{}, len(immichAssets))
+	for _, asset := range immichAssets {
+		existingAssetIDs[asset.ID] = struct{}{}
+	}
+	info("Already in album: %d assets", len(existingAssetIDs))
+
+	matchedAssetIDs, notFound, err := findAlbumAssetIDs(files)
+	if err != nil {
+		return
+	}
+	newAssets := make([]string, 0, len(matchedAssetIDs))
+	skipped := 0
+	for _, assetID := range matchedAssetIDs {
+		if _, ok := existingAssetIDs[assetID]; ok {
+			skipped++
+			continue
+		}
+		newAssets = append(newAssets, assetID)
+	}
+	if skipped > 0 {
+		info("Skipped %d assets already present", skipped)
+	}
+	addAssetsToAlbum(album, newAssets, override, notFound)
 }
 
 func createAlbum(albumName string, description string, files []TakeoutFile) {
@@ -1048,6 +1071,17 @@ func createAlbum(albumName string, description string, files []TakeoutFile) {
 	info("New album: %s (%d Takeout images)", albumName, len(files))
 	if !confirmAlbumAction(fmt.Sprintf("Create album and sync %d images?", len(files))) {
 		warning("Album skipped: %s (not created)", albumName)
+		return
+	}
+	matchedAssetIDs, notFound, err := findAlbumAssetIDs(files)
+	if err != nil {
+		return
+	}
+	if len(matchedAssetIDs) == 0 {
+		warning("Album skipped: %s (no matching Immich images; not created)", albumName)
+		if notFound > 0 {
+			warning("%d assets not found in Immich", notFound)
+		}
 		return
 	}
 	body, err := getJSONData("albums", http.MethodPost, struct {
@@ -1068,7 +1102,7 @@ func createAlbum(albumName string, description string, files []TakeoutFile) {
 		return
 	}
 	success("Album created: %s", albumName)
-	syncAlbum(immichAlbum, files, true)
+	addAssetsToAlbum(immichAlbum, matchedAssetIDs, true, notFound)
 }
 
 func normalizeAPIURL(rawURL string) (string, error) {

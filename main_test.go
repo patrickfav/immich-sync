@@ -319,6 +319,46 @@ func TestCreateAlbumSkipsEmptyAlbum(t *testing.T) {
 	}
 }
 
+func TestCreateAlbumSkipsWhenNoImmichAssetsMatch(t *testing.T) {
+	oldAPIURL, oldAPIKey, oldHTTPClient := apiURL, apiKey, httpClient
+	oldApproveAllAlbums := approveAllAlbums
+	oldAssetSearchCache := assetSearchCache
+	t.Cleanup(func() {
+		apiURL, apiKey, httpClient = oldAPIURL, oldAPIKey, oldHTTPClient
+		approveAllAlbums = oldApproveAllAlbums
+		assetSearchCache = oldAssetSearchCache
+	})
+
+	var albumCreated bool
+	server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		switch {
+		case r.Method == http.MethodPost && r.URL.Path == "/search/metadata":
+			_, _ = w.Write([]byte(`{"assets":{"total":0,"count":0,"items":[]}}`))
+		case r.Method == http.MethodPost && r.URL.Path == "/albums":
+			albumCreated = true
+		default:
+			t.Fatalf("unexpected request: %s %s", r.Method, r.URL.Path)
+		}
+	}))
+	defer server.Close()
+
+	apiURL = server.URL
+	apiKey = "test-key"
+	httpClient = server.Client()
+	approveAllAlbums = true
+	assetSearchCache = nil
+
+	createAlbum("Unmatched album", "should not be created", []TakeoutFile{{
+		Filename:       "missing.jpg",
+		CreationTime:   "1760044090",
+		PhotoTakenTime: "1759504776",
+	}})
+
+	if albumCreated {
+		t.Fatal("createAlbum() created an album without matching Immich assets")
+	}
+}
+
 func TestCreateAlbumSendsDescription(t *testing.T) {
 	oldAPIURL, oldAPIKey, oldHTTPClient := apiURL, apiKey, httpClient
 	oldApproveAllAlbums := approveAllAlbums
@@ -364,6 +404,7 @@ func TestCreateAlbumSendsDescription(t *testing.T) {
 	apiKey = "test-key"
 	httpClient = server.Client()
 	approveAllAlbums = true
+	assetSearchCache = nil
 
 	createAlbum("Holiday", "A day in Crete", []TakeoutFile{{
 		Filename:       "photo.jpg",
