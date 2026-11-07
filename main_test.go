@@ -11,6 +11,7 @@ import (
 	"strings"
 	"sync/atomic"
 	"testing"
+	"time"
 )
 
 func writeTestFile(t *testing.T, path string, contents string) {
@@ -386,6 +387,122 @@ func TestAPIEndpointNormalizesSlashes(t *testing.T) {
 	}
 	if got != "https://immich.example/api/search/metadata" {
 		t.Fatalf("apiEndpoint() = %q, want normalized endpoint", got)
+	}
+}
+
+func TestRateLimitDelayHonorsServerHeaders(t *testing.T) {
+	now := time.Date(2026, time.November, 7, 12, 0, 0, 0, time.UTC)
+
+	if got, source := rateLimitDelay(http.Header{"Retry-After": []string{"3"}}, 0, now); got != 3*time.Second || source != "Retry-After" {
+		t.Fatalf("rateLimitDelay() = %s, %q; want 3s, Retry-After", got, source)
+	}
+
+	reset := now.Add(17 * time.Second).Unix()
+	if got, source := rateLimitDelay(http.Header{"X-RateLimit-Reset": []string{fmt.Sprint(reset)}}, 0, now); got != 17*time.Second || source != "X-RateLimit-Reset" {
+		t.Fatalf("rateLimitDelay() = %s, %q; want 17s, X-RateLimit-Reset", got, source)
+	}
+
+	if got, source := rateLimitDelay(nil, 0, now); got != time.Minute || source != "fallback" {
+		t.Fatalf("rateLimitDelay() fallback = %s, %q; want 1m, fallback", got, source)
+	}
+	if got, _ := rateLimitDelay(nil, 1, now); got != 2*time.Minute {
+		t.Fatalf("rateLimitDelay() second fallback = %s, want 2m", got)
+	}
+}
+
+func TestGetDataRetriesAfterRateLimit(t *testing.T) {
+	oldAPIURL, oldAPIKey, oldHTTPClient := apiURL, apiKey, httpClient
+	rateLimitCooldown.Lock()
+	oldCooldown := rateLimitCooldown.until
+	rateLimitCooldown.Unlock()
+	t.Cleanup(func() {
+		apiURL, apiKey, httpClient = oldAPIURL, oldAPIKey, oldHTTPClient
+		rateLimitCooldown.Lock()
+		rateLimitCooldown.until = oldCooldown
+		rateLimitCooldown.Unlock()
+	})
+
+	var requests atomic.Int32
+	server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		if requests.Add(1) == 1 {
+			w.Header().Set("Retry-After", "0")
+			w.WriteHeader(http.StatusTooManyRequests)
+			_, _ = w.Write([]byte("Too Many Requests"))
+			return
+		}
+		_, _ = w.Write([]byte(`{"ok":true}`))
+	}))
+	defer server.Close()
+
+	apiURL = server.URL
+	apiKey = "test-key"
+	httpClient = server.Client()
+	rateLimitCooldown.Lock()
+	rateLimitCooldown.until = time.Time{}
+	rateLimitCooldown.Unlock()
+
+	body, err := getData("search/metadata", http.MethodPost, "{}")
+	if err != nil {
+		t.Fatalf("getData() returned an error: %v", err)
+	}
+	if string(body) != `{"ok":true}` {
+		t.Fatalf("getData() = %s, want successful retry response", body)
+	}
+	if got := requests.Load(); got != 2 {
+		t.Fatalf("request count = %d, want 2", got)
+	}
+}
+
+func TestNormalizeAPIURL(t *testing.T) {
+	tests := []struct {
+		name    string
+		input   string
+		want    string
+		wantErr bool
+	}{
+		{name: "https API URL", input: "https://immich.example/api", want: "https://immich.example/api/"},
+		{name: "http API URL with trailing slash", input: "http://localhost:2283/api/", want: "http://localhost:2283/api/"},
+		{name: "missing API path", input: "https://immich.example", wantErr: true},
+		{name: "wrong API path", input: "https://immich.example/v1", wantErr: true},
+		{name: "query string", input: "https://immich.example/api?key=value", wantErr: true},
+	}
+
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			got, err := normalizeAPIURL(tt.input)
+			if (err != nil) != tt.wantErr {
+				t.Fatalf("normalizeAPIURL(%q) error = %v, want error: %t", tt.input, err, tt.wantErr)
+			}
+			if !tt.wantErr && got != tt.want {
+				t.Fatalf("normalizeAPIURL(%q) = %q, want %q", tt.input, got, tt.want)
+			}
+		})
+	}
+}
+
+func TestValidateTakeoutPath(t *testing.T) {
+	root := t.TempDir()
+	writeTestFile(t, filepath.Join(root, "Holiday", "metadata.json"), `{"title":"Holiday"}`)
+	path, err := validateTakeoutPath(root)
+	if err != nil {
+		t.Fatalf("validateTakeoutPath() returned an error for a directory: %v", err)
+	}
+	if path != root {
+		t.Fatalf("validateTakeoutPath() = %q, want %q", path, root)
+	}
+
+	file := filepath.Join(root, "not-a-directory")
+	writeTestFile(t, file, "content")
+	if _, err := validateTakeoutPath(file); err == nil {
+		t.Fatal("validateTakeoutPath() accepted a file")
+	}
+	if _, err := validateTakeoutPath(filepath.Join(root, "missing")); err == nil {
+		t.Fatal("validateTakeoutPath() accepted a missing path")
+	}
+	wrongRoot := t.TempDir()
+	writeTestFile(t, filepath.Join(wrongRoot, "Google Photos", "photo.jpg"), "image bytes")
+	if _, err := validateTakeoutPath(wrongRoot); err == nil {
+		t.Fatal("validateTakeoutPath() accepted a directory without album metadata")
 	}
 }
 

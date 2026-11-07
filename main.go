@@ -8,6 +8,7 @@ import (
 	"fmt"
 	"io"
 	"net/http"
+	"net/url"
 	"os"
 	"path/filepath"
 	"sort"
@@ -77,6 +78,12 @@ type assetSearchResult struct {
 // Keep concurrent metadata searches bounded so faster syncs do not overwhelm Immich.
 const assetSearchWorkers = 6
 
+const (
+	maxRateLimitRetries          = 5
+	defaultRateLimitCooldown     = time.Minute
+	maxFallbackRateLimitCooldown = 5 * time.Minute
+)
+
 func readJSONFile(path string, value any) error {
 	body, err := os.ReadFile(path)
 	if err != nil {
@@ -142,6 +149,11 @@ var (
 )
 
 var httpClient = &http.Client{Timeout: 30 * time.Second}
+
+var rateLimitCooldown struct {
+	sync.Mutex
+	until time.Time
+}
 
 const (
 	ansiReset  = "\033[0m"
@@ -242,6 +254,63 @@ func promptPrefix() string {
 	return colorize(ansiBlue, "?")
 }
 
+func waitForRateLimitCooldown() {
+	for {
+		rateLimitCooldown.Lock()
+		wait := time.Until(rateLimitCooldown.until)
+		rateLimitCooldown.Unlock()
+		if wait <= 0 {
+			return
+		}
+		time.Sleep(wait)
+	}
+}
+
+func setRateLimitCooldown(delay time.Duration) {
+	if delay <= 0 {
+		return
+	}
+
+	rateLimitCooldown.Lock()
+	defer rateLimitCooldown.Unlock()
+	until := time.Now().Add(delay)
+	if until.After(rateLimitCooldown.until) {
+		rateLimitCooldown.until = until
+	}
+}
+
+func rateLimitDelay(headers http.Header, attempt int, now time.Time) (time.Duration, string) {
+	if retryAfter := strings.TrimSpace(headers.Get("Retry-After")); retryAfter != "" {
+		if seconds, err := strconv.ParseInt(retryAfter, 10, 64); err == nil && seconds >= 0 {
+			return time.Duration(seconds) * time.Second, "Retry-After"
+		}
+		if retryAt, err := http.ParseTime(retryAfter); err == nil {
+			if delay := retryAt.Sub(now); delay > 0 {
+				return delay, "Retry-After"
+			}
+			return 0, "Retry-After"
+		}
+	}
+
+	if reset := strings.TrimSpace(headers.Get("X-RateLimit-Reset")); reset != "" {
+		if seconds, err := strconv.ParseInt(reset, 10, 64); err == nil {
+			if delay := time.Unix(seconds, 0).Sub(now); delay > 0 {
+				return delay, "X-RateLimit-Reset"
+			}
+			return 0, "X-RateLimit-Reset"
+		}
+	}
+
+	delay := defaultRateLimitCooldown
+	for range attempt {
+		if delay >= maxFallbackRateLimitCooldown/2 {
+			return maxFallbackRateLimitCooldown, "fallback"
+		}
+		delay *= 2
+	}
+	return delay, "fallback"
+}
+
 func getData(path string, method string, payload string) ([]byte, error) {
 	if apiKey == "" {
 		return nil, errors.New("Immich API key is empty")
@@ -250,28 +319,44 @@ func getData(path string, method string, payload string) ([]byte, error) {
 	if err != nil {
 		return nil, err
 	}
-	req, err := http.NewRequest(method, endpoint, strings.NewReader(payload))
-	if err != nil {
-		return nil, err
-	}
-	req.Header.Set("Content-Type", "application/json")
-	req.Header.Set("Accept", "application/json")
-	req.Header.Set("x-api-key", apiKey)
+	for attempt := 0; ; attempt++ {
+		waitForRateLimitCooldown()
 
-	res, err := httpClient.Do(req)
-	if err != nil {
-		return nil, err
-	}
-	defer res.Body.Close()
+		req, err := http.NewRequest(method, endpoint, strings.NewReader(payload))
+		if err != nil {
+			return nil, err
+		}
+		req.Header.Set("Content-Type", "application/json")
+		req.Header.Set("Accept", "application/json")
+		req.Header.Set("x-api-key", apiKey)
 
-	body, err := io.ReadAll(res.Body)
-	if err != nil {
-		return nil, err
+		res, err := httpClient.Do(req)
+		if err != nil {
+			return nil, err
+		}
+		body, readErr := io.ReadAll(res.Body)
+		closeErr := res.Body.Close()
+		if readErr != nil {
+			return nil, readErr
+		}
+		if closeErr != nil {
+			return nil, closeErr
+		}
+
+		if res.StatusCode == http.StatusTooManyRequests && attempt < maxRateLimitRetries {
+			delay, source := rateLimitDelay(res.Header, attempt, time.Now())
+			setRateLimitCooldown(delay)
+			warning("Immich API rate limit reached; retrying in %s (%d/%d, %s)", delay.Round(time.Second), attempt+1, maxRateLimitRetries, source)
+			continue
+		}
+		if res.StatusCode < http.StatusOK || res.StatusCode >= http.StatusMultipleChoices {
+			if res.StatusCode == http.StatusTooManyRequests {
+				return nil, fmt.Errorf("Immich API %s %s returned HTTP %s after %d retries: %s", method, path, res.Status, maxRateLimitRetries, strings.TrimSpace(string(body)))
+			}
+			return nil, fmt.Errorf("Immich API %s %s returned HTTP %s: %s", method, path, res.Status, strings.TrimSpace(string(body)))
+		}
+		return body, nil
 	}
-	if res.StatusCode < http.StatusOK || res.StatusCode >= http.StatusMultipleChoices {
-		return nil, fmt.Errorf("Immich API %s %s returned HTTP %s: %s", method, path, res.Status, strings.TrimSpace(string(body)))
-	}
-	return body, nil
 }
 
 func YesNoPrompt(label string, def bool, required bool) bool {
@@ -984,48 +1069,107 @@ func createAlbum(albumName string, description string, files []TakeoutFile) {
 	syncAlbum(immichAlbum, files, true)
 }
 
-func readConfig() error {
-	bytefile, err := os.ReadFile("config.json")
-	if err == nil {
-		var config struct {
-			APIKey      string `json:"apiKey"`
-			APIURL      string `json:"apiURL"`
-			TakeoutPath string `json:"takeoutPath"`
-		}
-		if err := json.Unmarshal(bytefile, &config); err != nil {
-			return fmt.Errorf("invalid config.json: %w", err)
-		}
-		apiKey = config.APIKey
-		apiURL = config.APIURL
-		takeoutPath = config.TakeoutPath
-	} else if !errors.Is(err, os.ErrNotExist) {
-		return fmt.Errorf("could not read config.json: %w", err)
-	} else {
-		info("No config file found; using environment variables")
-		apiKey = os.Getenv("IMMICH_API_KEY")
-		apiURL = os.Getenv("IMMICH_API_URL")
-		takeoutPath = os.Getenv("IMMICH_TAKEOUT_PATH")
+func normalizeAPIURL(rawURL string) (string, error) {
+	parsed, err := url.Parse(strings.TrimSpace(rawURL))
+	if err != nil || parsed.Scheme == "" || parsed.Host == "" || (parsed.Scheme != "http" && parsed.Scheme != "https") {
+		return "", errors.New("IMMICH_API_URL must be a valid HTTP(S) URL ending in /api, for example https://immich.example/api")
+	}
+	if parsed.RawQuery != "" || parsed.Fragment != "" {
+		return "", errors.New("IMMICH_API_URL must not contain a query string or fragment")
+	}
+	path := strings.TrimRight(parsed.Path, "/")
+	if path != "/api" && !strings.HasSuffix(path, "/api") {
+		return "", errors.New("IMMICH_API_URL must end with /api, for example https://immich.example/api")
+	}
+	parsed.Path = path + "/"
+	parsed.RawPath = ""
+	return parsed.String(), nil
+}
+
+func validateTakeoutPath(rawPath string) (string, error) {
+	path := strings.TrimSpace(rawPath)
+	if path == "" {
+		return "", errors.New("IMMICH_TAKEOUT_PATH must point to the Google Photos directory")
+	}
+	info, err := os.Stat(path)
+	if err != nil {
+		return "", fmt.Errorf("IMMICH_TAKEOUT_PATH %q cannot be read: %w", path, err)
+	}
+	if !info.IsDir() {
+		return "", fmt.Errorf("IMMICH_TAKEOUT_PATH %q is not a directory", path)
 	}
 
-	apiKey = strings.TrimSpace(apiKey)
-	apiURL = strings.TrimSpace(apiURL)
-	if apiKey == "" {
-		return errors.New("no Immich API key configured")
+	entries, err := os.ReadDir(path)
+	if err != nil {
+		return "", fmt.Errorf("IMMICH_TAKEOUT_PATH %q cannot be inspected: %w", path, err)
 	}
-	if apiURL == "" {
-		return errors.New("no Immich API URL configured")
+	if googlePhotosInfo, googlePhotosErr := os.Stat(filepath.Join(path, "Google Photos")); googlePhotosErr == nil && googlePhotosInfo.IsDir() {
+		return "", fmt.Errorf("IMMICH_TAKEOUT_PATH %q is the outer Takeout directory; use %q instead", path, filepath.Join(path, "Google Photos"))
 	}
-	apiURL = strings.TrimRight(apiURL, "/") + "/"
-	if takeoutPath == "" {
-		info("No IMMICH_TAKEOUT_PATH set; using current directory")
-		takeoutPath = "."
+	albumDirectories := 0
+	metadataDirectories := 0
+	for _, entry := range entries {
+		if !entry.IsDir() {
+			continue
+		}
+		albumDirectories++
+		metadataPath := filepath.Join(path, entry.Name(), "metadata.json")
+		metadataInfo, metadataErr := os.Stat(metadataPath)
+		if metadataErr == nil && !metadataInfo.IsDir() {
+			metadataDirectories++
+		}
+	}
+	if albumDirectories == 0 {
+		return "", fmt.Errorf("IMMICH_TAKEOUT_PATH %q does not contain album directories; select the extracted Google Photos directory, not the outer Takeout folder", path)
+	}
+	if metadataDirectories == 0 {
+		return "", fmt.Errorf("IMMICH_TAKEOUT_PATH %q does not look like a Google Photos Takeout directory; expected album subdirectories containing metadata.json", path)
+	}
+	return filepath.Clean(path), nil
+}
+
+func environmentValue(name string, prompt string) (string, error) {
+	value := strings.TrimSpace(os.Getenv(name))
+	if value != "" {
+		return value, nil
+	}
+	value, ok := UserInput(prompt+" ("+name+")", "", true)
+	if !ok || strings.TrimSpace(value) == "" {
+		return "", fmt.Errorf("%s is not set and could not be read from the terminal", name)
+	}
+	return strings.TrimSpace(value), nil
+}
+
+func readEnvironment() error {
+	var err error
+	apiKey, err = environmentValue("IMMICH_API_KEY", "Enter Immich API key")
+	if err != nil {
+		return err
+	}
+
+	rawAPIURL, err := environmentValue("IMMICH_API_URL", "Enter Immich API URL")
+	if err != nil {
+		return err
+	}
+	apiURL, err = normalizeAPIURL(rawAPIURL)
+	if err != nil {
+		return err
+	}
+
+	rawTakeoutPath, err := environmentValue("IMMICH_TAKEOUT_PATH", "Enter Google Takeout path")
+	if err != nil {
+		return err
+	}
+	takeoutPath, err = validateTakeoutPath(rawTakeoutPath)
+	if err != nil {
+		return err
 	}
 	return nil
 }
 
 func main() {
 	section("📸", "Google Photos → Immich sync")
-	if err := readConfig(); err != nil {
+	if err := readEnvironment(); err != nil {
 		failure("%v", err)
 		return
 	}

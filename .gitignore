@@ -1,7 +1,6 @@
 .DS_Store
 *.log
 .idea
-config.json
 json
 main
 takeout-json

@@ -9,7 +9,7 @@ import missing assets, or delete album members.
 
 ## Project structure
 
-- `main.go` contains the CLI, configuration loading, Takeout discovery, and
+- `main.go` contains the CLI, environment loading, Takeout discovery, and
   Immich API operations.
 - `main_test.go` contains focused unit tests for local metadata parsing and
   filesystem discovery.
@@ -18,14 +18,11 @@ import missing assets, or delete album members.
 
 ## Configuration and secrets
 
-- `config.json` is used when it exists in the current working directory; it
-  takes precedence over environment variables.
-- Otherwise use `IMMICH_API_KEY`, `IMMICH_API_URL`, and optionally
-  `IMMICH_TAKEOUT_PATH`.
-- `IMMICH_API_URL` must include the `/api/` suffix; the program normalizes the
-  trailing slash.
-- Never commit, print, or log API keys. Keep local configuration files
-  private and use restrictive permissions such as `chmod 600 config.json`.
+- Use `IMMICH_API_KEY`, `IMMICH_API_URL`, and `IMMICH_TAKEOUT_PATH`.
+- If an environment variable is missing, the CLI prompts for it at startup.
+- `IMMICH_API_URL` must end with `/api`; the program normalizes the trailing
+  slash.
+- Never commit, print, or log API keys.
 - Do not add real Takeout metadata, image files, logs, or extracted archives to
   the repository.
 
@@ -33,6 +30,8 @@ import missing assets, or delete album members.
 
 - Album synchronization expects `IMMICH_TAKEOUT_PATH` to be the `Google Photos`
   directory containing album directories directly.
+- Startup validation checks that the path contains album subdirectories with
+  `metadata.json` and clearly rejects the outer `Takeout ...` directory.
 - Album discovery reads each album's `metadata.json` and reads JSON sidecars;
   image bytes are not required.
 - Date synchronization recursively recognizes Google sidecars ending in
@@ -48,6 +47,10 @@ import missing assets, or delete album members.
   in `main.go`. Keep the concurrency limit conservative, preserve Takeout
   ordering when constructing asset IDs, and keep progress output in the main
   goroutine.
+- Handle Immich HTTP 429 responses centrally. Honor `Retry-After` and
+  `X-RateLimit-Reset` when provided, use bounded exponential fallback cooldowns
+  otherwise, and coordinate the cooldown across concurrent requests. Do not
+  turn a rate-limit response into an unbounded retry loop.
 - Process albums deterministically: use descending Takeout album date
   timestamps when available, then lexicographic order for ties or undated
   albums. Never range over the album map directly for sync order.
@@ -81,6 +84,7 @@ When changing API requests:
 - preserve non-2xx response errors so configuration and API failures are
 -  visible to the user;
 - keep API requests bounded by the shared HTTP client timeout; and
+- handle HTTP 429 responses with the shared bounded cooldown/retry logic; and
 - avoid logging credentials or response data that may contain sensitive
   information.
 

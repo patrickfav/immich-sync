@@ -40,6 +40,15 @@ Album matching caches identical filename/time-window searches and performs up
 to six unique Immich lookups concurrently. The result order is still based on
 the deterministic Takeout file order.
 
+Immich API requests handle HTTP 429 responses with bounded retries. The program
+uses the server's `Retry-After` header when present, then
+`X-RateLimit-Reset`, and otherwise waits for one minute with exponential
+backoff up to five minutes. It retries at most five times and coordinates the
+cooldown across concurrent searches. Immich does not publish one universal
+429 cooldown: the limit may also be imposed by a reverse proxy such as
+Traefik, so a proxy-specific limit may need to be adjusted if retries keep
+failing.
+
 When creating a new Immich album, the non-empty Google album description is
 copied to it. Albums with no discovered photo metadata are reported with a
 warning and are not created.
@@ -82,27 +91,7 @@ are JSON sidecars such as:
 
 ## Configuration
 
-Configuration is read from `config.json` in the current working directory if
-that file exists. When it does not exist, the program uses environment
-variables instead. `config.json` takes precedence over the environment.
-
-### `config.json`
-
-```json
-{
-  "apiKey": "YourImmichApiKey",
-  "apiURL": "https://immich.example/api/",
-  "takeoutPath": "/path/to/Takeout 2026023/Google Photos"
-}
-```
-
-Keep this file private. On macOS and Linux, restrict it to your user:
-
-```shell
-chmod 600 config.json
-```
-
-### Environment variables
+The program reads these environment variables at startup:
 
 ```shell
 export IMMICH_API_KEY="YourImmichApiKey"
@@ -110,8 +99,12 @@ export IMMICH_API_URL="https://immich.example/api/"
 export IMMICH_TAKEOUT_PATH="/path/to/Takeout 2026023/Google Photos"
 ```
 
-`IMMICH_TAKEOUT_PATH` is optional when using environment variables; if omitted,
-the current directory is used. Use an absolute path when possible.
+If any variable is missing, the program prompts for it. The API URL must be a
+valid HTTP(S) URL ending in `/api` (with or without a trailing slash), and the
+Takeout value must point to an existing directory. Use an absolute path when
+possible. Startup also checks for album subdirectories containing
+`metadata.json` and explains if the outer `Takeout ...` directory was selected
+instead. API keys are never written to disk by the program.
 
 ## Build and usage
 
@@ -172,8 +165,9 @@ The Make targets use the current shell environment, so the normal
 `IMMICH_API_KEY`, `IMMICH_API_URL`, and `IMMICH_TAKEOUT_PATH` variables work
 with both `make run` and the built binary.
 
-The program first confirms the Immich API user, then asks whether to sync
-albums. Album synchronization asks for confirmation for each existing or new
+The program first collects and validates the three configuration values, then
+confirms the Immich API user and asks whether to sync albums. Album
+synchronization asks for confirmation for each existing or new
 album:
 
 ```text
@@ -278,6 +272,14 @@ the same as the filename in the Google sidecar's `title`. Also verify that
 search the relevant assets. Assets in an external library are usable only if
 they are returned by Immich's metadata search for that API key. This program
 does not upload the missing image.
+
+### HTTP 429 Too Many Requests
+
+The program waits and retries automatically. If the response includes
+`Retry-After` or `X-RateLimit-Reset`, that server-provided cooldown is used.
+Without either header, the fallback starts at one minute and backs off between
+retries. If all retries are exhausted, check the Immich reverse proxy for a
+rate-limit middleware or reduce the search concurrency in `main.go`.
 
 ### API validation errors
 
