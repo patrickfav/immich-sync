@@ -3,23 +3,23 @@
 ## Purpose
 
 `immich-sync` synchronizes Google Photos album membership into an existing
-Immich library. It reads Google Takeout metadata and uses the Immich API to
-find existing assets and add them to albums. It does not upload image files,
-import missing assets, or delete album members.
+Immich library. It uses local Google Takeout metadata and the Immich API to find
+existing assets and add them to albums. It does not upload image files, import
+missing assets, or delete album members.
 
 ## Project structure
 
-- `main.go` contains the CLI, environment loading, Takeout discovery, and
-  Immich API operations.
-- `main_test.go` contains focused unit tests for local metadata parsing and
+- `main.go` contains the CLI, validation, and Immich API operations.
+- `google_takeout.go` adapts Takeout data to the shared matching engine.
+- `*_test.go` contains focused unit tests for local metadata parsing and
   filesystem discovery.
 - `README.md` is the user-facing setup and operation guide.
 - `go.mod` defines the module and requires Go 1.27.3.
 
 ## Configuration and secrets
 
-- Use `IMMICH_API_KEY`, `IMMICH_API_URL`, and `IMMICH_TAKEOUT_PATH`.
-- If an environment variable is missing, the CLI prompts for it at startup.
+- Always use `IMMICH_API_KEY` and `IMMICH_API_URL`.
+- The program uses `IMMICH_TAKEOUT_PATH` and validates its structure.
 - `IMMICH_API_URL` must end with `/api`; the program normalizes the trailing
   slash.
 - Never commit, print, or log API keys.
@@ -62,14 +62,18 @@ import missing assets, or delete album members.
 
 ## Development workflow
 
-Use the Makefile from the repository root for the common checks. Before
-handing off a change, run:
+Use the Makefile from the repository root for the common checks. After every
+code change and before handing it off, always run `make check` to verify the
+change. If `fmt-check` fails, run `make fmt` and then rerun `make check`:
 
 ```shell
-make fmt
-make check
-make build
+make fmt && make check
 ```
+
+The `check` target runs the formatting check, tests, vet, and build.
+Editor diagnostics do not replace `make check`. If the local Go toolchain or
+other required command is unavailable, report that exact verification blocker
+and do not claim that the change passed the check.
 
 The Makefile intentionally has no install target; run `make run` for local
 execution or use the binary produced by `make build`.

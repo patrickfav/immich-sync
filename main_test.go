@@ -173,8 +173,8 @@ func TestFindAlbumByName(t *testing.T) {
 
 func TestOrderedAlbumNamesUsesNewestCreationTime(t *testing.T) {
 	albums := map[string][]TakeoutFile{
-		"Older":  nil,
-		"Newer":  nil,
+		"Older":   nil,
+		"Newer":   nil,
 		"Undated": nil,
 	}
 	creationTimes := map[string]int64{
@@ -439,8 +439,10 @@ func TestRateLimitDelayHonorsServerHeaders(t *testing.T) {
 	}
 
 	reset := now.Add(17 * time.Second).Unix()
-	if got, source := rateLimitDelay(http.Header{"X-RateLimit-Reset": []string{fmt.Sprint(reset)}}, 0, now); got != 17*time.Second || source != "X-RateLimit-Reset" {
-		t.Fatalf("rateLimitDelay() = %s, %q; want 17s, X-RateLimit-Reset", got, source)
+	resetHeaders := make(http.Header)
+	resetHeaders.Set("X-RateLimit-Reset", fmt.Sprint(reset))
+	if got, source := rateLimitDelay(resetHeaders, 0, now); got < 17*time.Second+minRateLimitJitter || got > 17*time.Second+maxRateLimitJitter || source != "X-RateLimit-Reset" {
+		t.Fatalf("rateLimitDelay() = %s, %q; want 17s plus 750ms-3s jitter", got, source)
 	}
 
 	if got, source := rateLimitDelay(nil, 0, now); got < time.Minute+minRateLimitJitter || got > time.Minute+maxRateLimitJitter || source != "fallback" {

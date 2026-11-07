@@ -27,12 +27,12 @@ Compared with the original implementation, this fork adds or improves:
 
 ## Description
 
-`immich-sync` copies album membership from a Google Photos Takeout into an
-existing Immich library. It is intended for cases where the same photos are
+`immich-sync` copies album membership from a local Google Photos Takeout into
+an existing Immich library. It is intended for cases where the same photos are
 already in Immich, but the album organization only exists in Google Photos.
 
 This tool does **not** import photos, upload image files, or create missing
-library assets. It reads Google Takeout metadata and uses the Immich API to add
+library assets. It reads source metadata and uses the Immich API to add
 already-existing assets to albums. For a complete Google Photos import, use a
 dedicated importer such as [immich-go](https://github.com/simulot/immich-go).
 
@@ -40,13 +40,11 @@ dedicated importer such as [immich-go](https://github.com/simulot/immich-go).
 
 The program has two workflows:
 
-1. **Album synchronization** scans the immediate subdirectories of the
-   configured Takeout path. Each album directory must contain a Google
-   `metadata.json`; its `title` becomes the Immich album name. The photo
-   sidecar JSON files provide the original filename and timestamps.
-2. **Date synchronization** recursively scans the configured path for Google
-   Photos metadata sidecars. It can compare the Takeout timestamp with Immich
-   assets and optionally update incorrect dates.
+1. **Album synchronization** loads album names and photo metadata from the
+   Takeout directory. Each album directory must contain a Google
+   `metadata.json`; its `title` becomes the Immich album name.
+2. **Date synchronization** compares Takeout metadata with Immich assets and
+   can optionally update incorrect dates.
 
 For album synchronization, assets are searched in Immich by:
 
@@ -86,7 +84,7 @@ Immich assets are also skipped before album creation.
 - An Immich API key with permission to search assets and modify albums
 - An Immich API URL including the `/api/` path, for example
   `https://immich.example/api/`; a missing trailing slash is normalized
-- A Google Photos Takeout directory containing the extracted metadata
+- A Google Photos directory containing the extracted Takeout metadata
 
 The program is run from a checkout or built with Go. The repository includes a
 Makefile for the common development commands; it does not install a global
@@ -118,20 +116,23 @@ are JSON sidecars such as:
 
 ## Configuration
 
-The program reads these environment variables at startup:
+The program always reads these environment variables at startup:
 
 ```shell
 export IMMICH_API_KEY="YourImmichApiKey"
 export IMMICH_API_URL="https://immich.example/api/"
+```
+
+Also set:
+
+```shell
 export IMMICH_TAKEOUT_PATH="/path/to/Takeout 2026023/Google Photos"
 ```
 
-If any variable is missing, the program prompts for it. The API URL must be a
-valid HTTP(S) URL ending in `/api` (with or without a trailing slash), and the
-Takeout value must point to an existing directory. Use an absolute path when
-possible. Startup also checks for album subdirectories containing
-`metadata.json` and explains if the outer `Takeout ...` directory was selected
-instead. API keys are never written to disk by the program.
+If a required variable is missing, the program prompts for it. The API URL must
+be a valid HTTP(S) URL ending in `/api` (with or without a trailing slash). The
+Takeout value must point to an existing Google Photos directory. API keys are
+never written to disk by the program.
 
 ## Build and usage
 
@@ -184,16 +185,16 @@ test         Run unit tests
 vet          Run go vet
 fmt          Format Go source files
 fmt-check    Check Go source formatting without changing files
-check        Run formatting, tests, and vet
+check        Run formatting, tests, vet, and build
 clean        Remove build artifacts
 ```
 
-The Make targets use the current shell environment, so the normal
-`IMMICH_API_KEY`, `IMMICH_API_URL`, and `IMMICH_TAKEOUT_PATH` variables work
-with both `make run` and the built binary.
+The Make targets use the current shell environment, so `IMMICH_API_KEY`,
+`IMMICH_API_URL`, and `IMMICH_TAKEOUT_PATH` work with both `make run` and the
+built binary.
 
-The program first collects and validates the three configuration values, then
-confirms the Immich API user and asks whether to sync albums. Album
+The program collects and validates its configuration values, confirms the
+Immich API user, and asks whether to sync albums. Album
 synchronization asks for confirmation for each existing or new
 album:
 

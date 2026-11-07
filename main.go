@@ -20,9 +20,9 @@ import (
 )
 
 type Asset struct {
-	Title        *string `json:"title"`
-	Description  string  `json:"description"`
-	Date         struct {
+	Title       *string `json:"title"`
+	Description string  `json:"description"`
+	Date        struct {
 		Timestamp string `json:"timestamp"`
 	} `json:"date"`
 	CreationTime struct {
@@ -83,8 +83,8 @@ const (
 	maxRateLimitRetries          = 5
 	defaultRateLimitCooldown     = time.Minute
 	maxFallbackRateLimitCooldown = 5 * time.Minute
-	minRateLimitJitter            = 750 * time.Millisecond
-	maxRateLimitJitter            = 3 * time.Second
+	minRateLimitJitter           = 750 * time.Millisecond
+	maxRateLimitJitter           = 3 * time.Second
 )
 
 func readJSONFile(path string, value any) error {
@@ -153,10 +153,12 @@ var (
 
 var httpClient = &http.Client{Timeout: 30 * time.Second}
 
-var rateLimitCooldown struct {
+type rateLimitState struct {
 	sync.Mutex
 	until time.Time
 }
+
+var rateLimitCooldown rateLimitState
 
 const (
 	ansiReset  = "\033[0m"
@@ -258,10 +260,14 @@ func promptPrefix() string {
 }
 
 func waitForRateLimitCooldown() {
+	waitForRateLimitCooldownState(&rateLimitCooldown)
+}
+
+func waitForRateLimitCooldownState(state *rateLimitState) {
 	for {
-		rateLimitCooldown.Lock()
-		wait := time.Until(rateLimitCooldown.until)
-		rateLimitCooldown.Unlock()
+		state.Lock()
+		wait := time.Until(state.until)
+		state.Unlock()
 		if wait <= 0 {
 			return
 		}
@@ -270,15 +276,19 @@ func waitForRateLimitCooldown() {
 }
 
 func setRateLimitCooldown(delay time.Duration) {
+	setRateLimitCooldownState(&rateLimitCooldown, delay)
+}
+
+func setRateLimitCooldownState(state *rateLimitState, delay time.Duration) {
 	if delay <= 0 {
 		return
 	}
 
-	rateLimitCooldown.Lock()
-	defer rateLimitCooldown.Unlock()
+	state.Lock()
+	defer state.Unlock()
 	until := time.Now().Add(delay)
-	if until.After(rateLimitCooldown.until) {
-		rateLimitCooldown.until = until
+	if until.After(state.until) {
+		state.until = until
 	}
 }
 
@@ -1216,6 +1226,7 @@ func main() {
 		failure("%v", err)
 		return
 	}
+	source := localTakeoutSource{}
 	flags := flag.NewFlagSet(os.Args[0], flag.ContinueOnError)
 	flags.SetOutput(os.Stderr)
 	flags.BoolVar(&suppressConfirmation, "y", false, "skip non-required confirmations")
@@ -1245,11 +1256,12 @@ func main() {
 
 	ok = YesNoPrompt("Do you want to sync your albums?", true, true)
 	if ok {
-		if err := readFiles(false); err != nil {
+		data, err := source.ReadAlbums()
+		if err != nil {
 			failure("%v", err)
 			return
 		}
-		if len(takeout) == 0 {
+		if len(data.Albums) == 0 {
 			warning("No files found")
 			return
 		}
@@ -1259,8 +1271,8 @@ func main() {
 			return
 		}
 		assetSearchCache = make(map[assetSearchQuery][]ImmichAsset)
-		for _, albumName := range orderedAlbumNames(takeout, takeoutAlbumCreationTimes) {
-			files := takeout[albumName]
+		for _, albumName := range orderedAlbumNames(data.Albums, data.CreationTimes) {
+			files := data.Albums[albumName]
 			if len(files) == 0 {
 				warning("Album skipped: %s (no images found)", albumName)
 				continue
@@ -1268,17 +1280,19 @@ func main() {
 			if album, found := findAlbumByName(albums, albumName); found {
 				syncAlbum(album, files, false)
 			} else {
-				createAlbum(albumName, takeoutAlbumDescriptions[albumName], files)
+				createAlbum(albumName, data.Descriptions[albumName], files)
 			}
 		}
 		success("Album synchronization complete")
 	} else {
 		ok = YesNoPrompt("Do you want to sync assets dates?", true, true)
 		if ok {
-			if err := readFiles(true); err != nil {
+			files, err := source.ReadFiles()
+			if err != nil {
 				failure("%v", err)
 				return
 			}
+			takeoutFiles = files
 			info("Found %d files", len(takeoutFiles))
 			date, inputOK := UserInput("Enter date to filter files (YYYY-MM-DD) or leave empty to sync all files: ", "", true)
 			if !inputOK {
