@@ -21,12 +21,12 @@ vet: ## Run go vet
 	$(GO) vet ./...
 
 fmt: ## Format Go source files
-	gofmt -w main.go main_test.go
+	gofmt -w *.go
 
 fmt-check: ## Check Go source formatting without changing files
-	test -z "$$(gofmt -l main.go main_test.go)"
+	test -z "$$(gofmt -l *.go)"
 
-check: fmt-check test vet ## Run formatting, tests, and vet
+check: fmt-check test vet build ## Run all local verification checks
 
 clean: ## Remove build artifacts
 	rm -rf bin
