@@ -98,9 +98,9 @@ directory itself, not its parent Takeout directory:
 ```text
 Takeout 2026023/
 └── Google Photos/
-    ├── Auf Kreta mit Theo #2025/
+    ├── My Supercool album in 2025/
     │   ├── metadata.json
-    │   ├── SNY00032_24MP.jpg.supplemental-metadata.json
+    │   ├── SNY00000.jpg.supplemental-metadata.json
     │   └── ...
     └── Another album/
         ├── metadata.json
