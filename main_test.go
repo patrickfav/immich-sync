@@ -88,6 +88,26 @@ func TestMinimumMatchedImagesPromptValidatesRange(t *testing.T) {
 	}
 }
 
+func TestIncludeArchivedPromptDefaultsToInclude(t *testing.T) {
+	oldStdinReader := stdinReader
+	t.Cleanup(func() { stdinReader = oldStdinReader })
+
+	stdinReader = bufio.NewReader(strings.NewReader("\n"))
+	if !includeArchivedPrompt() {
+		t.Fatal("includeArchivedPrompt() rejected the default include choice")
+	}
+}
+
+func TestIncludeArchivedPromptCanExclude(t *testing.T) {
+	oldStdinReader := stdinReader
+	t.Cleanup(func() { stdinReader = oldStdinReader })
+
+	stdinReader = bufio.NewReader(strings.NewReader("n\n"))
+	if includeArchivedPrompt() {
+		t.Fatal("includeArchivedPrompt() accepted archived items after n")
+	}
+}
+
 func TestAlbumMeetsCreationThreshold(t *testing.T) {
 	tests := []struct {
 		name    string
@@ -156,6 +176,45 @@ func TestReadFilesDiscoversAlbumSidecars(t *testing.T) {
 	}
 	if got := takeoutAlbumCreationTimes["Auf Kreta mit Theo #2025"]; got != 1760044090 {
 		t.Fatalf("discovered album timestamp = %d, want %d", got, 1760044090)
+	}
+}
+
+func TestReadFilesFiltersArchivedAlbumSidecars(t *testing.T) {
+	oldTakeout := takeout
+	oldTakeoutAlbumCreationTimes := takeoutAlbumCreationTimes
+	oldTakeoutAlbumDescriptions := takeoutAlbumDescriptions
+	oldTakeoutPath := takeoutPath
+	oldIncludeArchived := includeArchived
+	t.Cleanup(func() {
+		takeout = oldTakeout
+		takeoutAlbumCreationTimes = oldTakeoutAlbumCreationTimes
+		takeoutAlbumDescriptions = oldTakeoutAlbumDescriptions
+		takeoutPath = oldTakeoutPath
+		includeArchived = oldIncludeArchived
+	})
+
+	root := t.TempDir()
+	albumPath := filepath.Join(root, "Holiday")
+	writeTestFile(t, filepath.Join(albumPath, "metadata.json"), `{"title":"Holiday"}`)
+	writeTestFile(t, filepath.Join(albumPath, "active.jpg.supplemental-metadata.json"), `{"title":"active.jpg","photoTakenTime":{"timestamp":"1759504776"}}`)
+	writeTestFile(t, filepath.Join(albumPath, "archived.jpg.supplemental-metadata.json"), `{"title":"archived.jpg","archived":true,"photoTakenTime":{"timestamp":"1759504776"}}`)
+	takeoutPath = root
+
+	includeArchived = false
+	if err := readFiles(false); err != nil {
+		t.Fatalf("readFiles() excluding archived items failed: %v", err)
+	}
+	files := takeout["Holiday"]
+	if len(files) != 1 || files[0].Filename != "active.jpg" {
+		t.Fatalf("filtered album files = %#v, want only active.jpg", files)
+	}
+
+	includeArchived = true
+	if err := readFiles(false); err != nil {
+		t.Fatalf("readFiles() including archived items failed: %v", err)
+	}
+	if files = takeout["Holiday"]; len(files) != 2 {
+		t.Fatalf("unfiltered album files = %d, want 2", len(files))
 	}
 }
 

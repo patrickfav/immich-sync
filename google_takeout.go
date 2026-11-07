@@ -15,6 +15,7 @@ import (
 type Asset struct {
 	Title       *string `json:"title"`
 	Description string  `json:"description"`
+	Archived    bool    `json:"archived"`
 	Date        struct {
 		Timestamp string `json:"timestamp"`
 	} `json:"date"`
@@ -30,6 +31,7 @@ type TakeoutFile struct {
 	Filename       string
 	CreationTime   string
 	PhotoTakenTime string
+	Archived       bool
 }
 
 var takeout map[string][]TakeoutFile
@@ -167,8 +169,11 @@ func readAlbum(albumPath string, albumTitle string) error {
 		if asset.Title != nil && *asset.Title != "" {
 			fileName = *asset.Title
 		}
+		if !includeArchived && asset.Archived {
+			continue
+		}
 		if fileName != "" {
-			takeout[albumTitle] = append(takeout[albumTitle], TakeoutFile{Filename: fileName, CreationTime: asset.CreationTime.Timestamp, PhotoTakenTime: asset.PhotoTakenTime.Timestamp})
+			takeout[albumTitle] = append(takeout[albumTitle], TakeoutFile{Filename: fileName, CreationTime: asset.CreationTime.Timestamp, PhotoTakenTime: asset.PhotoTakenTime.Timestamp, Archived: asset.Archived})
 		}
 	}
 	imageCount := len(takeout[albumTitle])
@@ -197,8 +202,11 @@ func readAllDir(path string) error {
 				warning("Could not read photo metadata %s: %v", entryPath, err)
 				continue
 			}
+			if !includeArchived && asset.Archived {
+				continue
+			}
 			if asset.PhotoTakenTime.Timestamp != "" {
-				takeoutFiles = append(takeoutFiles, TakeoutFile{Filename: fileName, CreationTime: asset.CreationTime.Timestamp, PhotoTakenTime: asset.PhotoTakenTime.Timestamp})
+				takeoutFiles = append(takeoutFiles, TakeoutFile{Filename: fileName, CreationTime: asset.CreationTime.Timestamp, PhotoTakenTime: asset.PhotoTakenTime.Timestamp, Archived: asset.Archived})
 			}
 		}
 	}

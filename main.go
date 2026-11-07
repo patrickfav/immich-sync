@@ -15,6 +15,7 @@ import (
 var (
 	suppressConfirmation    = false
 	approveAllAlbums        = false
+	includeArchived         = true
 	minimumMatchedImages    = defaultMinimumMatchedImages
 	runSummary              syncSummary
 	stdinReader             = bufio.NewReader(os.Stdin)
@@ -236,6 +237,10 @@ func minimumMatchedImagesPrompt() (int, bool) {
 		}
 		warning("Please enter a whole number between 0 and 100")
 	}
+}
+
+func includeArchivedPrompt() bool {
+	return YesNoPrompt("Include archived Google Photos items?", true, true)
 }
 
 func albumMeetsCreationThreshold(totalImages int, matchedImages int, threshold int) bool {
@@ -653,6 +658,7 @@ func main() {
 	if err := flags.Parse(os.Args[1:]); err != nil {
 		return
 	}
+	includeArchived = includeArchivedPrompt()
 
 	body, err := getData("users/me", http.MethodGet, "")
 	if err != nil {

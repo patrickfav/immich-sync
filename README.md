@@ -40,6 +40,11 @@ Takeout images do not match; an album whose entire Takeout contents match is
 created regardless of the threshold. Setting the threshold to 0 also allows
 empty or completely unmatched albums to be created.
 
+At startup, the program also asks whether archived Google Photos items should
+be included. Choosing **No** removes Takeout entries with `"archived": true`
+before album counts, matching, and the minimum-match threshold are evaluated.
+This makes archived items behave as though they were never part of the album.
+
 Build and run the binary instead:
 
 ```shell
@@ -60,6 +65,7 @@ go run .
 ────────────────────────────────────────────────────────
 ? Are you Alex Example? (y/N) y
 ? Do you want to sync your albums? (Y/n) y
+? Include archived Google Photos items? (Y/n) n
 ? Minimum matched images for new albums (0-100) (default: 3):
 
 📦 Google Takeout
@@ -117,6 +123,8 @@ deterministic.
 Albums are processed newest first when their `metadata.json` has a creation
 timestamp, then lexicographically for ties or undated albums. A non-empty
 Google album description is copied only when a new Immich album is created.
+Archived items are included by default; the startup choice can exclude them
+before matching and threshold checks.
 By default, empty albums and albums with fewer than three matching Immich
 assets are skipped rather than created when some Takeout images are unmatched.
 The threshold can be changed at startup; a threshold of 0 allows empty albums.
@@ -172,6 +180,8 @@ n            skip the current album
 A            sync/create the current album and approve the rest
 -y           skip non-required confirmations
 
+The archived-items prompt defaults to including archived items; answer `n` to
+exclude entries whose Takeout metadata contains `"archived": true`.
 The startup threshold prompt accepts a number from 0 to 100 and defaults to 3.
 ```
 
