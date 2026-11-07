@@ -41,7 +41,8 @@ to six unique Immich lookups concurrently. The result order is still based on
 the deterministic Takeout file order.
 
 Immich API requests handle HTTP 429 responses with bounded retries. The program
-uses the server's `Retry-After` header when present, then
+uses the server's `Retry-After` header plus a one-second safety buffer when
+present, then
 `X-RateLimit-Reset`, and otherwise waits for one minute with exponential
 backoff up to five minutes. It retries at most five times and coordinates the
 cooldown across concurrent searches. Immich does not publish one universal
@@ -276,7 +277,8 @@ does not upload the missing image.
 ### HTTP 429 Too Many Requests
 
 The program waits and retries automatically. If the response includes
-`Retry-After` or `X-RateLimit-Reset`, that server-provided cooldown is used.
+`Retry-After` or `X-RateLimit-Reset`, that server-provided cooldown is used;
+`Retry-After` receives an additional one-second safety buffer.
 Without either header, the fallback starts at one minute and backs off between
 retries. If all retries are exhausted, check the Immich reverse proxy for a
 rate-limit middleware or reduce the search concurrency in `main.go`.

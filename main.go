@@ -82,6 +82,7 @@ const (
 	maxRateLimitRetries          = 5
 	defaultRateLimitCooldown     = time.Minute
 	maxFallbackRateLimitCooldown = 5 * time.Minute
+	retryAfterSafetyBuffer       = time.Second
 )
 
 func readJSONFile(path string, value any) error {
@@ -282,13 +283,14 @@ func setRateLimitCooldown(delay time.Duration) {
 func rateLimitDelay(headers http.Header, attempt int, now time.Time) (time.Duration, string) {
 	if retryAfter := strings.TrimSpace(headers.Get("Retry-After")); retryAfter != "" {
 		if seconds, err := strconv.ParseInt(retryAfter, 10, 64); err == nil && seconds >= 0 {
-			return time.Duration(seconds) * time.Second, "Retry-After"
+			return time.Duration(seconds)*time.Second + retryAfterSafetyBuffer, "Retry-After"
 		}
 		if retryAt, err := http.ParseTime(retryAfter); err == nil {
-			if delay := retryAt.Sub(now); delay > 0 {
-				return delay, "Retry-After"
+			delay := retryAt.Sub(now)
+			if delay < 0 {
+				delay = 0
 			}
-			return 0, "Retry-After"
+			return delay + retryAfterSafetyBuffer, "Retry-After"
 		}
 	}
 

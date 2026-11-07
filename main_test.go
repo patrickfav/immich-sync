@@ -393,8 +393,8 @@ func TestAPIEndpointNormalizesSlashes(t *testing.T) {
 func TestRateLimitDelayHonorsServerHeaders(t *testing.T) {
 	now := time.Date(2026, time.November, 7, 12, 0, 0, 0, time.UTC)
 
-	if got, source := rateLimitDelay(http.Header{"Retry-After": []string{"3"}}, 0, now); got != 3*time.Second || source != "Retry-After" {
-		t.Fatalf("rateLimitDelay() = %s, %q; want 3s, Retry-After", got, source)
+	if got, source := rateLimitDelay(http.Header{"Retry-After": []string{"3"}}, 0, now); got != 4*time.Second || source != "Retry-After" {
+		t.Fatalf("rateLimitDelay() = %s, %q; want 4s, Retry-After including safety buffer", got, source)
 	}
 
 	reset := now.Add(17 * time.Second).Unix()
