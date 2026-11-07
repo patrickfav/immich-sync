@@ -1,75 +1,241 @@
-# Google Photo to Immich sync
+# Google Photos album sync for Immich
 
 ## Description
 
-This tool is not for importing entire Google Photos takeout to immich (for that you can use [immich-go](https://github.com/simulot/immich-go)).
-This tool is to sync albums from Google Photos to existing Immich library.
+`immich-sync` copies album membership from a Google Photos Takeout into an
+existing Immich library. It is intended for cases where the same photos are
+already in Immich, but the album organization only exists in Google Photos.
 
-It also written in Go, just for fun.
+This tool does **not** import photos, upload image files, or create missing
+library assets. It reads Google Takeout metadata and uses the Immich API to add
+already-existing assets to albums. For a complete Google Photos import, use a
+dedicated importer such as [immich-go](https://github.com/simulot/immich-go).
 
-### Use case
-Let's say you have your photos backup configured to both Immich and Google Photos; or you just imported your old (i.e. Nextcloud) library to Immich, but you created albums only in Google Photos.
+## How it works
 
-In both places you have similar set of assets, and want to organize your hi-rez originals the same way as your (most likely compressed) library in Google Photos.
+The program has two workflows:
 
-You don't want to re-import the whole library every time you download Google Takeout, you just want to sync your albums every now and then.
+1. **Album synchronization** scans the immediate subdirectories of the
+   configured Takeout path. Each album directory must contain a Google
+   `metadata.json`; its `title` becomes the Immich album name. The photo
+   sidecar JSON files provide the original filename and timestamps.
+2. **Date synchronization** recursively scans the configured path for Google
+   Photos metadata sidecars. It can compare the Takeout timestamp with Immich
+   assets and optionally update incorrect dates.
 
-## How to use
+For album synchronization, assets are searched in Immich by:
 
-### Prerequisites
+- exact `originalFileName` match; and
+- a timestamp window of one day before to one day after the Google metadata
+  timestamps.
 
-Currently, script runs from the project's root and doesn't support installation.
+The image contents are never compared. Duplicate filenames can therefore
+produce an ambiguous or incorrect match, especially when different photos
+were taken close together. Existing album members are preserved; the program
+only appends missing assets and does not remove anything.
 
-- First, you need to setup Go: https://go.dev/doc/install
-- Then, clone this repo and go into the root folder with `main.go`
-- Run `go install` from the project root and add `IMMICH_API_KEY` and `IMMICH_API_URL` environment variables.
-- Add `IMMICH_TAKEOUT_PATH` with full path to your Google Photos takeout folder
-or go to that folder to run `immich-sync`.
+## Requirements
 
-#### Without installation
-- If you don't want to install and add environment variables, then create `config.json` in the project root with the following content:
+- Go 1.27.3 or newer
+- An Immich API key with permission to search assets and modify albums
+- An Immich API URL ending in `/api/`, for example
+  `https://immich.example/api/`
+- A Google Photos Takeout directory containing the extracted metadata
+
+The program currently has no separate installer or package manager. It is run
+from a checkout or built with Go.
+
+## Google Takeout layout
+
+For album synchronization, set `IMMICH_TAKEOUT_PATH` to the **Google Photos**
+directory itself, not its parent Takeout directory:
+
+```text
+Takeout 2026023/
+└── Google Photos/
+    ├── Auf Kreta mit Theo #2025/
+    │   ├── metadata.json
+    │   ├── SNY00032_24MP.jpg.supplemental-metadata.json
+    │   └── ...
+    └── Another album/
+        ├── metadata.json
+        └── ...
+```
+
+The image files are not required for this tool. The relevant metadata files
+are JSON sidecars such as:
+
+- `photo.jpg.supplemental-metadata.json`
+- `photo.jpg.suppl.json`
+- `photo.jpg.suppl(1).json`
+
+## Configuration
+
+Configuration is read from `config.json` in the current working directory if
+that file exists. When it does not exist, the program uses environment
+variables instead. `config.json` takes precedence over the environment.
+
+### `config.json`
+
 ```json
 {
-    "apiKey": "YourImmichApiKey",
-    "apiURL": "http://your_immich_host:port/api/",
-    "takeoutPath": "../Takeout/Google Photos"
+  "apiKey": "YourImmichApiKey",
+  "apiURL": "https://immich.example/api/",
+  "takeoutPath": "/path/to/Takeout 2026023/Google Photos"
 }
 ```
 
-### Usage
-Finally, run:
+Keep this file private. On macOS and Linux, restrict it to your user:
+
+```shell
+chmod 600 config.json
+```
+
+### Environment variables
+
+```shell
+export IMMICH_API_KEY="YourImmichApiKey"
+export IMMICH_API_URL="https://immich.example/api/"
+export IMMICH_TAKEOUT_PATH="/path/to/Takeout 2026023/Google Photos"
+```
+
+`IMMICH_TAKEOUT_PATH` is optional when using environment variables; if omitted,
+the current directory is used. Use an absolute path when possible.
+
+## Installation and usage
+
+Clone the repository and enter its root directory:
+
+```shell
+git clone https://github.com/patrickfav/immich-sync.git
+cd immich-sync
+```
+
+Install the binary into Go's binary directory:
+
+```shell
+go install .
+```
+
+Ensure `$(go env GOPATH)/bin` is on your `PATH`, then run:
+
 ```shell
 immich-sync
 ```
-or (if you want to run it without installation)
-```shell
-go run main.go
-```
-First, script will call your Immich instance API and verify the name of the API key owner.
 
-After that, it will scan your Google Photo takeout folder and find json files for albums with photos eligible to synchronization.
-
-Then, it will go over all albums asking if you want to sync photos to existing Immich album if it finds one, or create a new one. Every album synchonization require confirmation in command prompt. You can skip album confirmations by running the app with the ` -y` argument.
-Albums synchromization will not remove existing photos from Immich albums - it will just append missing ones. 
-
-### Files dates synchronization
-
-There's an option to sync assets dates for one day with the data from takeout json files. Sometimes google includes files with broken metadata, leaving proper dates inthe json files.
-For this, you need to skip album sync, and the next option would be to sync files. After that, you will be prompted with the dialog to enter the date. If date mismatch found between assets at this day and info from takeout, you will have an option to update assets with the takeout date/time.
-
-### Limitations
-
-Assets for synchronization searched by filename and creation time (+/- one day). That means that if you have different assets with identical filenames taken at the same day - this method could produce false positive search and potentially add extra or wrong assets to the albums.
-
-### Minimal space usage option
-
-Because pp relies only on `.json` files from Google Photos takeout, you can minimize use of your disk space by extracting only files required for synchronization.
-You'll need `7zip` installed for that. After ensuring it's in your system PATH, just execute this command inside your download folder, replacing `takeout-XXXX-XX-XXT000000Z` with your archive file pattern:
+Alternatively, run directly from the checkout:
 
 ```shell
-7z x takeout-XXXX-XX-XXT000000Z-*.zip -o"out" *.json -r
+go run .
 ```
-This will extract Google Takeout archive including only `.json` files.
 
-## To Do
-- Add CLI arguments support for configuration parameters
+The only command-line option currently supported is `-y`:
+
+```shell
+immich-sync -y
+```
+
+The program first confirms the Immich API user, then asks whether to sync
+albums. Album synchronization asks for confirmation for each existing album:
+
+```text
+Are you sure you want to sync this album? (Y/n/A)
+```
+
+- `Y` or Enter syncs the current album.
+- `n` skips the current album.
+- `A` syncs the current album and approves all remaining existing albums.
+- `-y` skips non-required confirmations, including album and new-album
+  confirmation prompts.
+
+If an album title from Google Photos does not exist in Immich, the program
+offers to create it and then adds the matching assets.
+
+## Date synchronization
+
+Choose **No** at the album prompt and **Yes** at the date synchronization
+prompt. The program recursively reads metadata sidecars and then asks for a
+date:
+
+- Enter `YYYY-MM-DD` to compare the Immich assets from that day with Takeout
+  metadata.
+- Leave the date empty to compare all discovered Takeout files by filename.
+
+When a date differs, the program asks before updating Immich's
+`dateTimeOriginal`. These update prompts are required and are not skipped by
+`-y`.
+
+## Extracting only metadata from a Takeout archive
+
+The image files are unnecessary, so a large Takeout archive can be extracted
+with only its JSON metadata. On macOS with Homebrew, install 7-Zip with:
+
+```shell
+brew install 7-zip
+```
+
+Homebrew provides the `7zz` executable. The `x` command preserves the archive's
+directory structure:
+
+```shell
+mkdir -p /path/to/takeout-json
+7zz x "/path/to/Google_Takeout_Photos.7z" \
+  -o"/path/to/takeout-json" \
+  -r "*.json"
+```
+
+The same command works for a `.zip` archive. After extraction, point the
+program at the nested Google Photos directory, for example:
+
+```shell
+export IMMICH_TAKEOUT_PATH="/path/to/takeout-json/Takeout 2026023/Google Photos"
+```
+
+To inspect an archive without extracting it:
+
+```shell
+7zz l "/path/to/Google_Takeout_Photos.7z"
+```
+
+With a solid 7z archive, extracting only JSON still may require 7-Zip to read
+large portions of the archive, but it keeps the extracted output small.
+
+## Troubleshooting
+
+### `No albums found`
+
+The configured path is probably too high or too low in the Takeout tree. For
+album synchronization it must contain the album directories directly, usually:
+
+```text
+.../Takeout 2026023/Google Photos
+```
+
+### No assets match
+
+Check that the asset already exists in Immich and that its original filename is
+the same as the filename in the Google sidecar's `title`. Also verify that
+`IMMICH_API_URL` includes the `/api/` suffix and that the configured API key can
+search the relevant assets. Assets in an external library are usable only if
+they are returned by Immich's metadata search for that API key. This program
+does not upload the missing image.
+
+### API validation errors
+
+The Immich metadata search requires full ISO 8601 timestamps, not date-only
+values. The current program generates those timestamps automatically; an API
+URL pointing at the wrong path or an incompatible Immich version can still
+produce validation errors.
+
+## Development
+
+Run the unit tests and static checks from the repository root:
+
+```shell
+go test ./...
+go vet ./...
+go build .
+```
+
+The tests focus on Takeout sidecar parsing and filesystem discovery. They do
+not contact an Immich server.
