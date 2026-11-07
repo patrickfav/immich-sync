@@ -36,6 +36,10 @@ exists, the program reads its current asset IDs through the album-scoped
 metadata search, skips those IDs, and appends only missing assets. Existing
 album members are preserved and nothing is removed.
 
+When creating a new Immich album, the non-empty Google album description is
+copied to it. Albums with no discovered photo metadata are reported with a
+warning and are not created.
+
 ## Requirements
 
 - Go 1.27.3 or newer
@@ -44,8 +48,9 @@ album members are preserved and nothing is removed.
   `https://immich.example/api/`
 - A Google Photos Takeout directory containing the extracted metadata
 
-The program currently has no separate installer or package manager. It is run
-from a checkout or built with Go.
+The program is run from a checkout or built with Go. The repository includes a
+Makefile for the common development commands; it does not install a global
+binary.
 
 ## Google Takeout layout
 
@@ -104,7 +109,7 @@ export IMMICH_TAKEOUT_PATH="/path/to/Takeout 2026023/Google Photos"
 `IMMICH_TAKEOUT_PATH` is optional when using environment variables; if omitted,
 the current directory is used. Use an absolute path when possible.
 
-## Installation and usage
+## Build and usage
 
 Clone the repository and enter its root directory:
 
@@ -113,29 +118,55 @@ git clone https://github.com/patrickfav/immich-sync.git
 cd immich-sync
 ```
 
-Install the binary into Go's binary directory:
+Build the binary into `bin/immich-sync`:
 
 ```shell
-go install .
+make build
 ```
 
-Ensure `$(go env GOPATH)/bin` is on your `PATH`, then run:
+Run the built binary:
 
 ```shell
-immich-sync
+./bin/immich-sync
 ```
 
-Alternatively, run directly from the checkout:
+Or run directly from the checkout:
 
 ```shell
-go run .
+make run
 ```
 
 The only command-line option currently supported is `-y`:
 
 ```shell
-immich-sync -y
+./bin/immich-sync -y
 ```
+
+The equivalent Make target is:
+
+```shell
+make run ARGS="-y"
+```
+
+### Make targets
+
+Run `make help` to list the available targets:
+
+```text
+help         Show available targets
+build        Build the binary into bin/
+run          Run the program; pass CLI flags with ARGS="..."
+test         Run unit tests
+vet          Run go vet
+fmt          Format Go source files
+fmt-check    Check Go source formatting without changing files
+check        Run formatting, tests, and vet
+clean        Remove build artifacts
+```
+
+The Make targets use the current shell environment, so the normal
+`IMMICH_API_KEY`, `IMMICH_API_URL`, and `IMMICH_TAKEOUT_PATH` variables work
+with both `make run` and the built binary.
 
 The program first confirms the Immich API user, then asks whether to sync
 albums. Album synchronization asks for confirmation for each existing or new
@@ -153,12 +184,25 @@ Are you sure you want to sync this album? (Y/n/A)
   confirmation prompts.
 
 If an album title from Google Photos does not exist in Immich, the program
-offers to create it and then adds the matching assets.
+offers to create it with the non-empty Google Photos description and then adds
+the matching assets. Albums with no discovered image metadata are skipped and
+are not created.
+
+Albums are processed newest first when their Takeout `metadata.json` includes a
+creation timestamp. Albums without timestamps are processed afterward in
+lexicographic order. If no album timestamps are available, all albums use
+lexicographic order.
 
 The duplicate check is based on Immich asset IDs, not filenames. This means a
 photo is skipped only when that exact Immich asset is already in the matching
 album. The album lookup is paginated, so albums larger than the API's default
 search page are also handled.
+
+The CLI uses light colors, separators, and status symbols when connected to a
+terminal. Album discovery shows the Takeout image count, confirmations include
+the number of images involved, and asset matching uses a compact progress bar.
+Colors and animated progress are automatically disabled when output is
+redirected. Set `NO_COLOR=1` or `TERM=dumb` to disable them explicitly.
 
 ## Date synchronization
 
@@ -238,12 +282,11 @@ produce validation errors.
 
 ## Development
 
-Run the unit tests and static checks from the repository root:
+Run the unit tests, static checks, and build from the repository root:
 
 ```shell
-go test ./...
-go vet ./...
-go build .
+make check
+make build
 ```
 
 The tests focus on Takeout sidecar parsing and filesystem discovery. They do

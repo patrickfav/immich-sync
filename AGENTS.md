@@ -43,18 +43,26 @@ import missing assets, or delete album members.
   the album ID. Do not rely on `GET /albums/:id` returning an `assets` array;
   current Immich API responses omit that field. Add only asset IDs that are
   not already in the album and preserve all existing members.
+- Process albums deterministically: use descending Takeout album date
+  timestamps when available, then lexicographic order for ties or undated
+  albums. Never range over the album map directly for sync order.
+- Copy a non-empty Google album description only when creating a new Immich
+  album. Skip empty Takeout albums with a warning; never create an album with
+  no discovered image metadata.
 
 ## Development workflow
 
-Use Go tooling from the repository root. Before handing off a change, run:
+Use the Makefile from the repository root for the common checks. Before
+handing off a change, run:
 
 ```shell
-gofmt -w main.go main_test.go
-go test ./...
-go vet ./...
-go build .
-git diff --check
+make fmt
+make check
+make build
 ```
+
+The Makefile intentionally has no install target; run `make run` for local
+execution or use the binary produced by `make build`.
 
 Add focused unit tests for new local behavior. Tests should use temporary
 directories and test HTTP handlers or injected clients rather than contacting
@@ -75,6 +83,9 @@ tests where the behavior can be tested without a terminal or live server.
 The current supported CLI option is `-y`; the album prompt also supports `A`
 to approve the current and remaining album actions, including new album
 creation.
+- Keep CLI decoration restrained: use the standard library, short status
+  symbols, and simple separators. Preserve readable plain output when stdout
+  is redirected or `NO_COLOR`/`TERM=dumb` disables ANSI colors.
 
 Do not perform live album mutations, date updates, or destructive repository
 operations as part of validation unless explicitly requested.

@@ -6,10 +6,10 @@ import (
 	"errors"
 	"fmt"
 	"io"
-	"log"
 	"net/http"
 	"os"
 	"path/filepath"
+	"sort"
 	"strconv"
 	"strings"
 	"time"
@@ -17,6 +17,10 @@ import (
 
 type Asset struct {
 	Title        *string `json:"title"`
+	Description  string  `json:"description"`
+	Date         struct {
+		Timestamp string `json:"timestamp"`
+	} `json:"date"`
 	CreationTime struct {
 		Timestamp string `json:"timestamp"`
 	} `json:"creationTime"`
@@ -92,6 +96,10 @@ func takeoutFilenameFromMetadata(name string) (string, bool) {
 
 var takeout map[string][]TakeoutFile
 
+var takeoutAlbumCreationTimes map[string]int64
+
+var takeoutAlbumDescriptions map[string]string
+
 var takeoutFiles []TakeoutFile
 
 var (
@@ -108,11 +116,115 @@ var (
 
 var httpClient = &http.Client{}
 
+const (
+	ansiReset  = "\033[0m"
+	ansiBold   = "\033[1m"
+	ansiDim    = "\033[2m"
+	ansiCyan   = "\033[36m"
+	ansiGreen  = "\033[32m"
+	ansiYellow = "\033[33m"
+	ansiRed    = "\033[31m"
+	ansiBlue   = "\033[34m"
+)
+
+func colorsEnabled() bool {
+	if _, disabled := os.LookupEnv("NO_COLOR"); disabled || os.Getenv("TERM") == "dumb" {
+		return false
+	}
+	return terminalOutputEnabled()
+}
+
+func terminalOutputEnabled() bool {
+	info, err := os.Stdout.Stat()
+	return err == nil && info.Mode()&os.ModeCharDevice != 0
+}
+
+func colorize(color string, text string) string {
+	if !colorsEnabled() {
+		return text
+	}
+	return color + text + ansiReset
+}
+
+func section(icon string, title string) {
+	line := strings.Repeat("─", 56)
+	fmt.Printf("\n%s %s\n%s\n", icon, colorize(ansiBold, title), colorize(ansiDim, line))
+}
+
+func info(format string, args ...any) {
+	fmt.Printf("%s %s\n", colorize(ansiCyan, "ℹ"), fmt.Sprintf(format, args...))
+}
+
+func success(format string, args ...any) {
+	fmt.Printf("%s %s\n", colorize(ansiGreen, "✓"), fmt.Sprintf(format, args...))
+}
+
+func warning(format string, args ...any) {
+	fmt.Printf("%s %s\n", colorize(ansiYellow, "⚠"), fmt.Sprintf(format, args...))
+}
+
+func failure(format string, args ...any) {
+	fmt.Printf("%s %s\n", colorize(ansiRed, "✗"), fmt.Sprintf(format, args...))
+}
+
+func progressBar(current int, total int) string {
+	const width = 24
+	if total <= 0 {
+		return strings.Repeat("─", width)
+	}
+	filled := current * width / total
+	if filled > width {
+		filled = width
+	}
+	return strings.Repeat("━", filled) + strings.Repeat("─", width-filled)
+}
+
+func startProgress(label string, total int) bool {
+	interactive := terminalOutputEnabled() && colorsEnabled()
+	if interactive {
+		fmt.Printf("%s %s [%s] 0/%d", colorize(ansiBlue, "→"), label, progressBar(0, total), total)
+	} else {
+		info("%s (%d images)", label, total)
+	}
+	return interactive
+}
+
+func updateProgress(interactive bool, label string, current int, total int) {
+	if !interactive {
+		return
+	}
+	fmt.Printf("\r\033[K%s %s [%s] %d/%d", colorize(ansiBlue, "→"), label, progressBar(current, total), current, total)
+}
+
+func finishProgress(interactive bool, label string, total int) {
+	if interactive {
+		updateProgress(true, label, total, total)
+		fmt.Printf(" %s\n", colorize(ansiGreen, "✓"))
+		return
+	}
+	success("Checked %d images", total)
+}
+
+func stopProgress(interactive bool) {
+	if interactive {
+		fmt.Println()
+	}
+}
+
+func fatal(format string, args ...any) {
+	failure(format, args...)
+	os.Exit(1)
+}
+
+func promptPrefix() string {
+	return colorize(ansiBlue, "?")
+}
+
 func getData(path string, method string, payload string) ([]byte, error) {
 	url := apiURL + path
 	req, err := http.NewRequest(method, url, strings.NewReader(payload))
 	if apiKey == "" {
-		fmt.Println("No API key set")
+		failure("No API key set")
 		os.Exit(1)
 	}
 
@@ -152,7 +264,7 @@ func YesNoPrompt(label string, def bool, required bool) bool {
 	var s string
 
 	for {
-		fmt.Fprintf(os.Stderr, "%s (%s) ", label, choices)
+		fmt.Fprintf(os.Stderr, "%s %s (%s) ", promptPrefix(), label, choices)
 		s, _ = stdinReader.ReadString('\n')
 		s = strings.TrimSpace(s)
 		if s == "" {
@@ -174,7 +286,7 @@ func AlbumConfirmation(label string) (confirm bool, approveAll bool) {
 	}
 
 	for {
-		fmt.Fprintf(os.Stderr, "%s (Y/n/A) ", label)
+		fmt.Fprintf(os.Stderr, "%s %s (Y/n/A) ", promptPrefix(), label)
 		s, _ := stdinReader.ReadString('\n')
 		s = strings.ToLower(strings.TrimSpace(s))
 		switch s {
@@ -204,9 +316,9 @@ func UserInput(label string, def string, required bool) string {
 
 	for {
 		if def != "" {
-			fmt.Fprintf(os.Stderr, "%s (default: %s): ", label, def)
+			fmt.Fprintf(os.Stderr, "%s %s (default: %s): ", promptPrefix(), label, def)
 		} else {
-			fmt.Fprintf(os.Stderr, "%s: ", label)
+			fmt.Fprintf(os.Stderr, "%s %s: ", promptPrefix(), label)
 		}
 		s, _ = stdinReader.ReadString('\n')
 		s = strings.TrimSpace(s)
@@ -225,16 +337,17 @@ func UserInput(label string, def string, required bool) string {
 }
 
 func getAlbums() (albums []Album, err error) {
-	fmt.Println("Getting Immich albums...")
+	section("🗂️", "Immich albums")
+	info("Loading albums...")
 	body, err := getData("albums", "GET", "")
 	if err != nil {
-		fmt.Println(err)
+		failure("%v", err)
 		return nil, err
 	}
 	if err := json.Unmarshal(body, &albums); err != nil {
 		return nil, fmt.Errorf("invalid albums response: %w", err)
 	}
-	fmt.Printf("Total albums: %d\n", len(albums))
+	success("Found %d albums", len(albums))
 	return albums, nil
 }
 
@@ -247,17 +360,46 @@ func findAlbumByName(albums []Album, albumName string) (Album, bool) {
 	return Album{}, false
 }
 
+func orderedAlbumNames(albums map[string][]TakeoutFile, creationTimes map[string]int64) []string {
+	names := make([]string, 0, len(albums))
+	for name := range albums {
+		names = append(names, name)
+	}
+
+	sort.Slice(names, func(i, j int) bool {
+		leftDate, leftHasDate := creationTimes[names[i]]
+		rightDate, rightHasDate := creationTimes[names[j]]
+		if leftHasDate != rightHasDate {
+			return leftHasDate
+		}
+		if leftHasDate && leftDate != rightDate {
+			return leftDate > rightDate
+		}
+		return names[i] < names[j]
+	})
+
+	return names
+}
+
 func readFiles(readAll bool) {
 	basePath := takeoutPath
 	entries, err := os.ReadDir(basePath)
 	if err != nil {
-		log.Fatal(err)
+		fatal("Could not read Takeout directory: %v", err)
 	}
 	if takeout == nil {
 		takeout = make(map[string][]TakeoutFile)
 	}
-	fmt.Println("Reading takeout albums...")
+	if takeoutAlbumCreationTimes == nil {
+		takeoutAlbumCreationTimes = make(map[string]int64)
+	}
+	if takeoutAlbumDescriptions == nil {
+		takeoutAlbumDescriptions = make(map[string]string)
+	}
+	section("📦", "Google Takeout")
+	info("Reading album metadata...")
 	albumsTotal := 0
+	imagesTotal := 0
 	for _, entry := range entries {
 		entryPath := filepath.Join(basePath, entry.Name())
 		if readAll && entry.IsDir() {
@@ -271,29 +413,32 @@ func readFiles(readAll bool) {
 		var asset Asset
 		if err := readJSONFile(filepath.Join(entryPath, "metadata.json"), &asset); err != nil {
 			if !errors.Is(err, os.ErrNotExist) {
-				fmt.Printf("Could not read album metadata %s: %v\n", entryPath, err)
+				warning("Could not read album metadata %s: %v", entryPath, err)
 			}
 			continue
 		}
 		if asset.Title != nil && *asset.Title != "" {
 			albumsTotal++
+			takeoutAlbumDescriptions[*asset.Title] = strings.TrimSpace(asset.Description)
+			if timestamp, err := strconv.ParseInt(asset.Date.Timestamp, 10, 64); err == nil {
+				takeoutAlbumCreationTimes[*asset.Title] = timestamp
+			}
 			readAlbum(entryPath, *asset.Title)
+			imagesTotal += len(takeout[*asset.Title])
 		}
 	}
 	if albumsTotal == 0 {
-		fmt.Println("No albums found")
+		warning("No albums found")
 	} else {
-		fmt.Printf("Found %d albums\n", albumsTotal)
+		success("Found %d albums with %d images", albumsTotal, imagesTotal)
 	}
 
 }
 
 func readAlbum(albumPath string, albumTitle string) {
-
-	fmt.Println("Found album: " + albumTitle)
 	entries, err := os.ReadDir(albumPath)
 	if err != nil {
-		log.Fatal(err)
+		fatal("Could not read album directory: %v", err)
 	}
 	if _, ok := takeout[albumTitle]; !ok {
 		takeout[albumTitle] = []TakeoutFile{}
@@ -304,19 +449,21 @@ func readAlbum(albumPath string, albumTitle string) {
 		}
 		var asset Asset
 		if err := readJSONFile(filepath.Join(albumPath, entry.Name()), &asset); err != nil {
-			fmt.Printf("Could not read photo metadata %s: %v\n", entry.Name(), err)
+			warning("Could not read photo metadata %s: %v", entry.Name(), err)
 			continue
 		}
 		if asset.Title != nil && *asset.Title != "" {
 			takeout[albumTitle] = append(takeout[albumTitle], TakeoutFile{Filename: *asset.Title, CreationTime: asset.CreationTime.Timestamp, PhotoTakenTime: asset.PhotoTakenTime.Timestamp})
 		}
 	}
+	imageCount := len(takeout[albumTitle])
+	fmt.Printf("  %s %-*s %s\n", colorize(ansiBlue, "▸"), 48, albumTitle, colorize(ansiDim, fmt.Sprintf("%d images", imageCount)))
 }
 
 func readAllDir(path string) {
 	entries, err := os.ReadDir(path)
 	if err != nil {
-		log.Fatal(err)
+		fatal("Could not read Takeout directory: %v", err)
 	}
 	for _, entry := range entries {
 		entryPath := filepath.Join(path, entry.Name())
@@ -329,7 +476,7 @@ func readAllDir(path string) {
 			}
 			var asset Asset
 			if err := readJSONFile(entryPath, &asset); err != nil {
-				fmt.Printf("Could not read photo metadata %s: %v\n", entryPath, err)
+				warning("Could not read photo metadata %s: %v", entryPath, err)
 				continue
 			}
 			if asset.Title != nil && *asset.Title != "" && asset.PhotoTakenTime.Timestamp != "" {
@@ -347,12 +494,12 @@ func findAssetByFilename(filename string, createdAfter string, createdBefore str
 	}{OriginalFileName: filename, TakenAfter: createdAfter, TakenBefore: createdBefore}
 	body, err := getJSONData("search/metadata", "POST", payload)
 	if err != nil {
-		fmt.Println(err)
+		failure("%v", err)
 		return
 	}
 	var response ImmichAlbumAsset
 	if err := json.Unmarshal(body, &response); err != nil {
-		fmt.Println("Invalid Immich search response:", err)
+		failure("Invalid Immich search response: %v", err)
 		return
 	}
 	if response.Assets.Total == 0 {
@@ -405,12 +552,12 @@ func findAssetsByDate(date string) (assets []ImmichAsset) {
 	}{TakenAfter: date + "T00:00:00Z", TakenBefore: date + "T23:59:59Z"}
 	body, err := getJSONData("search/metadata", "POST", payload)
 	if err != nil {
-		fmt.Println(err)
+		failure("%v", err)
 		return []ImmichAsset{}
 	}
 	var response ImmichAlbumAsset
 	if err := json.Unmarshal(body, &response); err != nil {
-		fmt.Println("Invalid Immich search response:", err)
+		failure("Invalid Immich search response: %v", err)
 		return []ImmichAsset{}
 	}
 	if response.Assets.Total == 0 {
@@ -420,20 +567,21 @@ func findAssetsByDate(date string) (assets []ImmichAsset) {
 }
 
 func syncFilesDates() {
-	fmt.Println("Syncing files dates...")
+	section("📅", "Date synchronization")
+	info("Checking Takeout timestamps against Immich...")
 	for _, file := range takeoutFiles {
 		photoTakenTimestamp, err1 := strconv.ParseInt(file.PhotoTakenTime, 10, 64)
 		if err1 != nil {
-			fmt.Println("Error parsing timestamp:", err1)
+			failure("Error parsing timestamp: %v", err1)
 			return
 		}
 		assets := findAssetByFilename(file.Filename, "", "")
 		if len(assets) == 0 {
-			fmt.Println("Asset not found: " + file.Filename)
+			warning("Asset not found: %s", file.Filename)
 			continue
 		}
 		if len(assets) > 1 {
-			fmt.Println("More than one asset found: " + file.Filename)
+			warning("More than one asset found: %s", file.Filename)
 			continue
 		}
 		asset := assets[0]
@@ -441,13 +589,13 @@ func syncFilesDates() {
 		photoTakenDate := tm.UTC().Format("2006-01-02")
 		assetCreatedAtDateObj, err := time.Parse("2006-01-02T15:04:05.000Z", asset.FileCreatedAt)
 		if err != nil {
-			fmt.Println("Error parsing date:", err)
+			failure("Error parsing Immich date: %v", err)
 			continue
 		}
 		assetCreatedAtDate := assetCreatedAtDateObj.UTC().Format("2006-01-02")
 		if photoTakenDate != assetCreatedAtDate {
 			photoTaken := tm.UTC().Format("2006-01-02T15:04:05.000Z")
-			fmt.Printf("Updating %s: %s -> %s\n", file.Filename, asset.FileCreatedAt, photoTaken)
+			info("Updating %s: %s → %s", file.Filename, asset.FileCreatedAt, photoTaken)
 			ok := YesNoPrompt("Are you sure you want to update this file?", false, true)
 			if !ok {
 				continue
@@ -456,22 +604,25 @@ func syncFilesDates() {
 				DateTimeOriginal string `json:"dateTimeOriginal"`
 			}{DateTimeOriginal: photoTaken})
 			if err != nil {
-				fmt.Println(err)
+				failure("%v", err)
+			} else {
+				success("Updated %s", file.Filename)
 			}
 		} else {
-			fmt.Printf("No update needed for %s\n", file.Filename)
+			fmt.Printf("  %s %s\n", colorize(ansiGreen, "✓"), "No update needed for "+file.Filename)
 		}
 	}
 }
 
 func syncFilesByDate(date string) {
-	fmt.Println("Syncing files by date: " + date)
+	section("📅", "Date synchronization")
+	info("Filtering Immich assets for %s", date)
 	assets := findAssetsByDate(date)
 	if len(assets) == 0 {
-		fmt.Println("No assets found for date: " + date)
+		warning("No assets found for date: %s", date)
 		return
 	}
-	fmt.Printf("Found %d assets for date: %s\n", len(assets), date)
+	success("Found %d assets for %s", len(assets), date)
 	suppressConfirmation = false
 	for _, asset := range assets {
 		found := false
@@ -480,20 +631,20 @@ func syncFilesByDate(date string) {
 				found = true
 				photoTakenTimestamp, err1 := strconv.ParseInt(file.PhotoTakenTime, 10, 64)
 				if err1 != nil {
-					fmt.Println("Error parsing timestamp:", err1)
+					failure("Error parsing timestamp: %v", err1)
 					return
 				}
 				tm := time.Unix(photoTakenTimestamp, 0)
 				photoTakenDate := tm.UTC().Format("2006-01-02")
 				assetCreatedAtDateObj, err := time.Parse("2006-01-02T15:04:05.000Z", asset.FileCreatedAt)
 				if err != nil {
-					fmt.Println("Error parsing date:", err)
+					failure("Error parsing Immich date: %v", err)
 					continue
 				}
 				assetCreatedAtDate := assetCreatedAtDateObj.UTC().Format("2006-01-02")
 				if photoTakenDate != assetCreatedAtDate {
 					photoTaken := tm.UTC().Format("2006-01-02T15:04:05.000Z")
-					fmt.Printf("Updating %s: %s -> %s\n", file.Filename, asset.FileCreatedAt, photoTaken)
+					info("Updating %s: %s → %s", file.Filename, asset.FileCreatedAt, photoTaken)
 					ok := YesNoPrompt("Are you sure you want to update this file?", false, true)
 					if !ok {
 						continue
@@ -502,47 +653,55 @@ func syncFilesByDate(date string) {
 						DateTimeOriginal string `json:"dateTimeOriginal"`
 					}{DateTimeOriginal: photoTaken})
 					if err != nil {
-						fmt.Println(err)
+						failure("%v", err)
+					} else {
+						success("Updated %s", file.Filename)
 					}
 				} else {
-					fmt.Printf("No update needed for %s\n", file.Filename)
+					fmt.Printf("  %s %s\n", colorize(ansiGreen, "✓"), "No update needed for "+file.Filename)
 				}
 				break
 			}
 		}
 		if !found {
-			fmt.Println("No matching file found in takeout for asset: " + asset.OriginalFileName)
+			warning("No matching Takeout file for asset: %s", asset.OriginalFileName)
 		}
 	}
 }
 
 func syncAlbum(album Album, files []TakeoutFile, override bool) {
-	fmt.Println("Syncing album: " + album.AlbumName)
-	if !override && !confirmAlbumAction("Are you sure you want to sync this album?") {
+	section("🖼️", "Album: "+album.AlbumName)
+	if len(files) == 0 {
+		warning("No images found in Takeout album; skipping")
+		return
+	}
+	if !override && !confirmAlbumAction(fmt.Sprintf("Sync %d Takeout images into this album?", len(files))) {
+		warning("Skipped album: %s", album.AlbumName)
 		return
 	}
 	immichAssets, err := getAlbumAssets(album.ID)
 	if err != nil {
-		fmt.Println(err)
+		failure("%v", err)
 		return
 	}
 	existingAssetIDs := make(map[string]struct{}, len(immichAssets))
 	for _, asset := range immichAssets {
 		existingAssetIDs[asset.ID] = struct{}{}
 	}
-	fmt.Printf("Found %d existing assets in %s\n", len(existingAssetIDs), album.AlbumName)
+	info("Already in album: %d assets", len(existingAssetIDs))
 
 	newAssets := []string{}
 	newAssetIDs := make(map[string]struct{})
 	notFound := 0
 	skipped := 0
-	fmt.Print("Searching files ")
-	for _, file := range files {
-		fmt.Print(".")
+	progressLabel := "Matching Takeout images"
+	interactiveProgress := startProgress(progressLabel, len(files))
+	for index, file := range files {
 		createdAfterTimestamp, err1 := strconv.ParseInt(file.PhotoTakenTime, 10, 64)
 		createdBeforeTimestamp, err2 := strconv.ParseInt(file.CreationTime, 10, 64)
 		if err1 != nil || err2 != nil {
-			fmt.Println("Error parsing timestamp:", err1, err2)
+			stopProgress(interactiveProgress)
+			failure("Error parsing timestamps: %v / %v", err1, err2)
 			return
 		}
 		tm1 := time.Unix(createdAfterTimestamp, 0)
@@ -566,10 +725,11 @@ func syncAlbum(album Album, files []TakeoutFile, override bool) {
 			newAssetIDs[asset.ID] = struct{}{}
 			newAssets = append(newAssets, asset.ID)
 		}
+		updateProgress(interactiveProgress, progressLabel, index+1, len(files))
 	}
-	fmt.Println(" Done")
+	finishProgress(interactiveProgress, progressLabel, len(files))
 	if skipped > 0 {
-		fmt.Printf("Skipped %d assets already in %s\n", skipped, album.AlbumName)
+		info("Skipped %d assets already present", skipped)
 	}
 	if len(newAssets) > 0 {
 		body, err := getJSONData("albums/"+album.ID+"/assets", "PUT", struct {
@@ -577,7 +737,7 @@ func syncAlbum(album Album, files []TakeoutFile, override bool) {
 		}{IDs: newAssets})
 
 		if err != nil {
-			fmt.Println(err)
+			failure("%v", err)
 			return
 		}
 		var response []struct {
@@ -585,44 +745,50 @@ func syncAlbum(album Album, files []TakeoutFile, override bool) {
 			Success bool   `json:"success"`
 		}
 		if err := json.Unmarshal(body, &response); err != nil {
-			fmt.Println("Invalid album assets response:", err)
+			failure("Invalid album assets response: %v", err)
 			return
 		}
 		i := 0
 		for _, r := range response {
 			if !r.Success {
-				fmt.Println("Error syncing asset: " + r.ID)
+				failure("Error syncing asset: %s", r.ID)
 			} else {
 				i++
 			}
 		}
-		fmt.Println("Synced " + strconv.Itoa(i) + " assets to " + album.AlbumName)
+		success("Added %d assets", i)
 	} else {
-		fmt.Println("No new assets added to " + album.AlbumName)
+		info("No new assets to add")
 	}
 	if notFound > 0 {
-		fmt.Println("Warning: " + strconv.Itoa(notFound) + " assets not found")
+		warning("%d assets not found in Immich", notFound)
 	}
 }
 
-func createAlbum(albumName string, files []TakeoutFile) {
-	fmt.Println("Creating album: " + albumName)
-	if !confirmAlbumAction("Are you sure you want to create this album?") {
+func createAlbum(albumName string, description string, files []TakeoutFile) {
+	if len(files) == 0 {
+		warning("No images found in Takeout album; not creating it")
+		return
+	}
+	info("New album: %s (%d Takeout images)", albumName, len(files))
+	if !confirmAlbumAction(fmt.Sprintf("Create album and sync %d images?", len(files))) {
+		warning("Skipped album: %s", albumName)
 		return
 	}
 	body, err := getJSONData("albums", "POST", struct {
-		AlbumName string `json:"albumName"`
-	}{AlbumName: albumName})
+		AlbumName   string `json:"albumName"`
+		Description string `json:"description,omitempty"`
+	}{AlbumName: albumName, Description: description})
 	if err != nil {
-		fmt.Println(err)
+		failure("%v", err)
 		return
 	}
 	var immichAlbum Album
 	if err := json.Unmarshal(body, &immichAlbum); err != nil {
-		fmt.Println("Invalid album response:", err)
+		failure("Invalid album response: %v", err)
 		return
 	}
-	fmt.Printf("New album created: %s\n", immichAlbum.ID)
+	success("Created album")
 	syncAlbum(immichAlbum, files, true)
 }
 
@@ -635,7 +801,7 @@ func readConfig() {
 			TakeoutPath string `json:"takeoutPath"`
 		}
 		if err := json.Unmarshal(bytefile, &config); err != nil {
-			fmt.Println("Invalid config.json:", err)
+			failure("Invalid config.json: %v", err)
 			os.Exit(1)
 		}
 		apiKey = config.APIKey
@@ -644,29 +810,30 @@ func readConfig() {
 		return
 	}
 	if !errors.Is(err, os.ErrNotExist) {
-		fmt.Println("Could not read config.json:", err)
+		failure("Could not read config.json: %v", err)
 		os.Exit(1)
 	}
 
-	fmt.Println("No config file found, trying ENV vars...")
+	info("No config file found; using environment variables")
 	apiKey = os.Getenv("IMMICH_API_KEY")
 	apiURL = os.Getenv("IMMICH_API_URL")
 	takeoutPath = os.Getenv("IMMICH_TAKEOUT_PATH")
 	if apiKey == "" {
-		fmt.Println("No IMMICH_API_KEY set")
+		failure("No IMMICH_API_KEY set")
 		os.Exit(1)
 	}
 	if apiURL == "" {
-		fmt.Println("No IMMICH_API_URL set")
+		failure("No IMMICH_API_URL set")
 		os.Exit(1)
 	}
 	if takeoutPath == "" {
-		fmt.Println("No IMMICH_TAKEOUT_PATH set, using current directory")
+		info("No IMMICH_TAKEOUT_PATH set; using current directory")
 		takeoutPath = "."
 	}
 }
 
 func main() {
+	section("📸", "Google Photos → Immich sync")
 	readConfig()
 
 	if len(os.Args) > 1 && os.Args[1] == "-y" {
@@ -675,7 +842,7 @@ func main() {
 
 	body, err := getData("users/me", "GET", "")
 	if err != nil {
-		fmt.Println(err)
+		failure("%v", err)
 		return
 	}
 	var response struct {
@@ -683,13 +850,13 @@ func main() {
 		Name string `json:"name"`
 	}
 	if err := json.Unmarshal(body, &response); err != nil {
-		fmt.Println("Invalid user response:", err)
+		failure("Invalid user response: %v", err)
 		return
 	}
 
 	ok := YesNoPrompt("Are you "+response.Name+"?", false, true)
 	if !ok {
-		fmt.Println("Bye-bye...")
+		info("Bye-bye")
 		return
 	}
 
@@ -697,36 +864,41 @@ func main() {
 	if ok {
 		readFiles(false)
 		if len(takeout) == 0 {
-			fmt.Println("No files found")
+			warning("No files found")
 			return
 		}
 		albums, err := getAlbums()
 		if err != nil {
-			fmt.Println(err)
+			failure("%v", err)
 			return
 		}
-		for albumName, files := range takeout {
+		for _, albumName := range orderedAlbumNames(takeout, takeoutAlbumCreationTimes) {
+			files := takeout[albumName]
+			if len(files) == 0 {
+				warning("No images found in Takeout album %q; skipping", albumName)
+				continue
+			}
 			if album, found := findAlbumByName(albums, albumName); found {
 				syncAlbum(album, files, false)
 			} else {
-				createAlbum(albumName, files)
+				createAlbum(albumName, takeoutAlbumDescriptions[albumName], files)
 			}
 		}
-		fmt.Println("Done!")
+		success("Album synchronization complete")
 	} else {
 		ok = YesNoPrompt("Do you want to sync assets dates?", true, true)
 		if ok {
 			readFiles(true)
-			fmt.Println("Found total files: " + strconv.Itoa(len(takeoutFiles)))
+			info("Found %d files", len(takeoutFiles))
 			date := UserInput("Enter date to filter files (YYYY-MM-DD) or leave empty to sync all files: ", "", true)
 			if date != "" {
 				syncFilesByDate(date)
 			} else {
 				syncFilesDates()
 			}
-			fmt.Println("Done!")
+			success("Date synchronization complete")
 		} else {
-			fmt.Println("Bye-bye...")
+			info("Bye-bye")
 			return
 		}
 	}

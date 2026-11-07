@@ -62,17 +62,33 @@ func TestTakeoutFilenameFromMetadata(t *testing.T) {
 	}
 }
 
+func TestProgressBar(t *testing.T) {
+	if got := progressBar(0, 10); got != "────────────────────────" {
+		t.Fatalf("progressBar(0, 10) = %q, want empty bar", got)
+	}
+	if got := progressBar(5, 10); got != "━━━━━━━━━━━━────────────" {
+		t.Fatalf("progressBar(5, 10) = %q, want half-filled bar", got)
+	}
+	if got := progressBar(10, 10); got != "━━━━━━━━━━━━━━━━━━━━━━━━" {
+		t.Fatalf("progressBar(10, 10) = %q, want full bar", got)
+	}
+}
+
 func TestReadFilesDiscoversAlbumSidecars(t *testing.T) {
 	oldTakeout := takeout
+	oldTakeoutAlbumCreationTimes := takeoutAlbumCreationTimes
+	oldTakeoutAlbumDescriptions := takeoutAlbumDescriptions
 	oldTakeoutPath := takeoutPath
 	t.Cleanup(func() {
 		takeout = oldTakeout
+		takeoutAlbumCreationTimes = oldTakeoutAlbumCreationTimes
+		takeoutAlbumDescriptions = oldTakeoutAlbumDescriptions
 		takeoutPath = oldTakeoutPath
 	})
 
 	root := t.TempDir()
 	albumPath := filepath.Join(root, "Auf Kreta mit Theo #2025")
-	writeTestFile(t, filepath.Join(albumPath, "metadata.json"), `{"title":"Auf Kreta mit Theo #2025"}`)
+	writeTestFile(t, filepath.Join(albumPath, "metadata.json"), `{"title":"Auf Kreta mit Theo #2025","description":"A day in Crete","date":{"timestamp":"1760044090"}}`)
 	writeTestFile(t, filepath.Join(albumPath, "SNY00032_24MP.jpg.supplemental-metadata.json"), `{
   "title": "SNY00032_24MP.jpg",
   "creationTime": {"timestamp": "1760044090"},
@@ -92,6 +108,12 @@ func TestReadFilesDiscoversAlbumSidecars(t *testing.T) {
 	}
 	if files[0].PhotoTakenTime != "1759504776" || files[0].CreationTime != "1760044090" {
 		t.Fatalf("discovered timestamps = %q/%q, want 1759504776/1760044090", files[0].PhotoTakenTime, files[0].CreationTime)
+	}
+	if got := takeoutAlbumDescriptions["Auf Kreta mit Theo #2025"]; got != "A day in Crete" {
+		t.Fatalf("discovered album description = %q, want %q", got, "A day in Crete")
+	}
+	if got := takeoutAlbumCreationTimes["Auf Kreta mit Theo #2025"]; got != 1760044090 {
+		t.Fatalf("discovered album timestamp = %d, want %d", got, 1760044090)
 	}
 }
 
@@ -138,6 +160,38 @@ func TestFindAlbumByName(t *testing.T) {
 	}
 	if _, ok := findAlbumByName(albums, "Missing"); ok {
 		t.Fatal("findAlbumByName() found a missing album")
+	}
+}
+
+func TestOrderedAlbumNamesUsesNewestCreationTime(t *testing.T) {
+	albums := map[string][]TakeoutFile{
+		"Older":  nil,
+		"Newer":  nil,
+		"Undated": nil,
+	}
+	creationTimes := map[string]int64{
+		"Older": 100,
+		"Newer": 200,
+	}
+
+	want := []string{"Newer", "Older", "Undated"}
+	got := orderedAlbumNames(albums, creationTimes)
+	if strings.Join(got, ",") != strings.Join(want, ",") {
+		t.Fatalf("orderedAlbumNames() = %v, want %v", got, want)
+	}
+}
+
+func TestOrderedAlbumNamesFallsBackToLexicographicOrder(t *testing.T) {
+	albums := map[string][]TakeoutFile{
+		"Zulu":  nil,
+		"Alpha": nil,
+		"Mango": nil,
+	}
+
+	want := []string{"Alpha", "Mango", "Zulu"}
+	got := orderedAlbumNames(albums, nil)
+	if strings.Join(got, ",") != strings.Join(want, ",") {
+		t.Fatalf("orderedAlbumNames() = %v, want %v", got, want)
 	}
 }
 
@@ -219,5 +273,85 @@ func TestSyncAlbumAddsOnlyMissingAssets(t *testing.T) {
 
 	if len(addedIDs) != 1 || addedIDs[0] != "new-id" {
 		t.Fatalf("added asset IDs = %v, want [new-id]", addedIDs)
+	}
+}
+
+func TestCreateAlbumSkipsEmptyAlbum(t *testing.T) {
+	oldAPIURL, oldAPIKey, oldHTTPClient := apiURL, apiKey, httpClient
+	oldApproveAllAlbums := approveAllAlbums
+	t.Cleanup(func() {
+		apiURL, apiKey, httpClient = oldAPIURL, oldAPIKey, oldHTTPClient
+		approveAllAlbums = oldApproveAllAlbums
+	})
+
+	called := false
+	server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		called = true
+	}))
+	defer server.Close()
+
+	apiURL = server.URL + "/"
+	apiKey = "test-key"
+	httpClient = server.Client()
+	approveAllAlbums = true
+
+	createAlbum("Empty album", "should not be sent", nil)
+	if called {
+		t.Fatal("createAlbum() made an API request for an empty album")
+	}
+}
+
+func TestCreateAlbumSendsDescription(t *testing.T) {
+	oldAPIURL, oldAPIKey, oldHTTPClient := apiURL, apiKey, httpClient
+	oldApproveAllAlbums := approveAllAlbums
+	t.Cleanup(func() {
+		apiURL, apiKey, httpClient = oldAPIURL, oldAPIKey, oldHTTPClient
+		approveAllAlbums = oldApproveAllAlbums
+	})
+
+	var description string
+	server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		w.Header().Set("Content-Type", "application/json")
+		switch {
+		case r.Method == http.MethodPost && r.URL.Path == "/albums":
+			var payload struct {
+				Description string `json:"description"`
+			}
+			if err := json.NewDecoder(r.Body).Decode(&payload); err != nil {
+				t.Fatalf("decode create album request: %v", err)
+			}
+			description = payload.Description
+			_, _ = w.Write([]byte(`{"id":"album-id","albumName":"Holiday"}`))
+		case r.Method == http.MethodPost && r.URL.Path == "/search/metadata":
+			var payload map[string]any
+			if err := json.NewDecoder(r.Body).Decode(&payload); err != nil {
+				t.Fatalf("decode search request: %v", err)
+			}
+			if _, ok := payload["albumIds"]; ok {
+				_, _ = w.Write([]byte(`{"assets":{"total":0,"count":0,"items":[]}}`))
+				return
+			}
+			_, _ = w.Write([]byte(`{"assets":{"total":1,"count":1,"items":[{"id":"asset-id","originalFileName":"photo.jpg"}]}}`))
+		case r.Method == http.MethodPut && r.URL.Path == "/albums/album-id/assets":
+			_, _ = w.Write([]byte(`[{"id":"asset-id","success":true}]`))
+		default:
+			t.Fatalf("unexpected request: %s %s", r.Method, r.URL.Path)
+		}
+	}))
+	defer server.Close()
+
+	apiURL = server.URL + "/"
+	apiKey = "test-key"
+	httpClient = server.Client()
+	approveAllAlbums = true
+
+	createAlbum("Holiday", "A day in Crete", []TakeoutFile{{
+		Filename:       "photo.jpg",
+		CreationTime:   "1760044090",
+		PhotoTakenTime: "1759504776",
+	}})
+
+	if description != "A day in Crete" {
+		t.Fatalf("created album description = %q, want %q", description, "A day in Crete")
 	}
 }
