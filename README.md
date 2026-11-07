@@ -1,293 +1,197 @@
-# Google Photos Album Sync for Immich (without image copy)
+# Google Photos → Immich album sync
 
-## Fork and improvements
+`immich-sync` recreates Google Photos album membership in an existing Immich
+library. It reads Google Takeout metadata, finds the matching assets already in
+Immich, and adds those assets to albums.
+
+> **No image upload, import, or deletion.** Existing Immich album members are
+> preserved. For a complete Google Photos import, use a tool such as
+> [immich-go](https://github.com/simulot/immich-go).
 
 This repository is a maintained fork of
-[web-gears/immich-sync](https://github.com/web-gears/immich-sync). It keeps the
-original purpose—recreating Google Photos album membership in Immich when the
-assets are already present—while making the sync safer, more predictable, and
-easier to operate.
+[web-gears/immich-sync](https://github.com/web-gears/immich-sync), with safer
+matching, deterministic processing, bounded API retries, metadata-only
+Takeout support, album descriptions, and a more informative CLI.
 
-Compared with the original implementation, this fork adds or improves:
+## Quick start
 
-- deterministic album ordering, with newest albums first when dated;
-- album merging by Immich asset ID without deleting existing members;
-- filename-and-timestamp matching with pagination, caching, and bounded
-  concurrency;
-- pre-creation matching so empty or completely unmatched albums are never
-  created;
-- Google album descriptions copied to newly created Immich albums;
-- metadata-only Google Takeout support, including sidecar filename variants;
-- API URL and Takeout structure validation with clear startup errors;
-- bounded HTTP 429 retries honoring server cooldown headers plus randomized
-  750ms–3000ms jitter;
-- clearer terminal output, the `A` approve-all option, and explicit album
-  created/updated/unchanged/skipped statuses;
-- focused unit tests, a Makefile, and expanded project documentation.
+Requirements: Go 1.27.3+, an Immich API key that can search assets and modify
+albums, and an extracted Google Photos Takeout. Configure the API and Takeout
+directory, then run from the repository root:
 
-## Description
+```shell
+export IMMICH_API_KEY="your-immich-api-key"
+export IMMICH_API_URL="https://immich.example/api/"
+export IMMICH_TAKEOUT_PATH="/path/to/Takeout 2026023/Google Photos"
 
-`immich-sync` copies album membership from a local Google Photos Takeout into
-an existing Immich library. It is intended for cases where the same photos are
-already in Immich, but the album organization only exists in Google Photos.
+make run
+```
 
-This tool does **not** import photos, upload image files, or create missing
-library assets. It reads source metadata and uses the Immich API to add
-already-existing assets to albums. For a complete Google Photos import, use a
-dedicated importer such as [immich-go](https://github.com/simulot/immich-go).
+`IMMICH_API_URL` must be an HTTP(S) URL ending in `/api` (with or without a
+trailing slash). `IMMICH_TAKEOUT_PATH` must point to the **Google Photos**
+directory itself—not the outer `Takeout ...` directory. API keys are never
+written to disk by the program. Missing required values are requested
+interactively.
 
-## How it works
+Build and run the binary instead:
 
-The program has two workflows:
+```shell
+make build
+./bin/immich-sync
+./bin/immich-sync -y        # skip album confirmations
+```
 
-1. **Album synchronization** loads album names and photo metadata from the
-   Takeout directory. Each album directory must contain a Google
-   `metadata.json`; its `title` becomes the Immich album name.
-2. **Date synchronization** compares Takeout metadata with Immich assets and
-   can optionally update incorrect dates.
+## CLI preview
 
-For album synchronization, assets are searched in Immich by:
+The following is a representative run with generic paths, names, and counts.
 
-- exact `originalFileName` match; and
-- a timestamp window of one day before to one day after the Google metadata
-  timestamps.
+```text
+➜  immich-sync git:(main) IMMICH_TAKEOUT_PATH="/Users/example/immich-sync/takeout-json/Takeout 2026023/Google Photos" make run
+go run .
 
-The image contents are never compared. Duplicate filenames can therefore
-produce an ambiguous or incorrect match, especially when different photos
-were taken close together. When an Immich album with the same name already
-exists, the program reads its current asset IDs through the album-scoped
-metadata search, skips those IDs, and appends only missing assets. Existing
-album members are preserved and nothing is removed.
+📸 Google Photos → Immich sync
+────────────────────────────────────────────────────────
+? Are you Alex Example? (y/N) y
+? Do you want to sync your albums? (Y/n) y
 
-Album matching caches identical filename/time-window searches and performs up
-to six unique Immich lookups concurrently. The result order is still based on
-the deterministic Takeout file order.
+📦 Google Takeout
+────────────────────────────────────────────────────────
+ℹ Reading album metadata...
+  ▸ Family brunch 2025                         6 images
+  ▸ Summer trip 2025                          215 images
+  ▸ Wedding reception 2024                    590 images
+  ▸ ...
+✓ Found 12 albums with 1,352 images
 
-Immich API requests handle HTTP 429 responses with bounded retries. The program
-uses the server's `Retry-After` header plus random 750ms-3000ms jitter when
-present, then
-`X-RateLimit-Reset`, and otherwise waits for one minute with exponential
-backoff up to five minutes. It retries at most five times and coordinates the
-cooldown across concurrent searches. Immich does not publish one universal
-429 cooldown: the limit may also be imposed by a reverse proxy such as
-Traefik, so a proxy-specific limit may need to be adjusted if retries keep
-failing.
+🗂️ Immich albums
+────────────────────────────────────────────────────────
+ℹ Loading albums...
+✓ Found 9 albums
 
-When creating a new Immich album, the non-empty Google album description is
-copied to it. Albums with no discovered photo metadata are reported with a
-warning and are not created. Albums whose Takeout files have no matching
-Immich assets are also skipped before album creation.
+🖼️ Album: Summer trip 2025
+────────────────────────────────────────────────────────
+? Sync 215 Takeout images into this album? (Y/n) y
+✓ Updated album: added 215 assets
+```
 
-## Requirements
+When output is redirected, or `NO_COLOR=1` / `TERM=dumb` is set, colors and
+animated progress are disabled. Use `A` at an album prompt to approve the
+current and all remaining album actions.
 
-- Go 1.27.3 or newer
-- An Immich API key with permission to search assets and modify albums
-- An Immich API URL including the `/api/` path, for example
-  `https://immich.example/api/`; a missing trailing slash is normalized
-- A Google Photos directory containing the extracted Takeout metadata
+## What it does
 
-The program is run from a checkout or built with Go. The repository includes a
-Makefile for the common development commands; it does not install a global
-binary.
+### Album synchronization
 
-## Google Takeout layout
+For each Takeout album, the tool:
 
-For album synchronization, set `IMMICH_TAKEOUT_PATH` to the **Google Photos**
-directory itself, not its parent Takeout directory:
+1. reads the album title and metadata;
+2. searches Immich by exact original filename plus a timestamp window of one
+   day before to one day after the Google timestamp;
+3. loads existing album members using the paginated, album-scoped metadata
+   search;
+4. adds only missing Immich asset IDs, preserving all existing members.
+
+Matching is based on filename and time—not image content. Duplicate filenames
+near the same timestamp can therefore be ambiguous. Identical searches are
+cached, up to six unique lookups run concurrently, and Takeout ordering remains
+deterministic.
+
+Albums are processed newest first when their `metadata.json` has a creation
+timestamp, then lexicographically for ties or undated albums. A non-empty
+Google album description is copied only when a new Immich album is created.
+Empty albums and albums with no matching Immich assets are skipped rather than
+created.
+
+The CLI reports `created`, `updated`, `unchanged`, and `skipped` outcomes. It
+also handles HTTP 429 responses centrally: it honors `Retry-After` and
+`X-RateLimit-Reset`, adds 750–3000 ms of random jitter, coordinates cooldowns
+across concurrent requests, and stops after five bounded retries. If no server
+cooldown is supplied, it uses exponential backoff from one minute up to five
+minutes. A reverse proxy such as Traefik may need its rate limit adjusted.
+
+### Date synchronization
+
+Choose **No** at the album prompt and **Yes** at the date prompt. The tool
+recursively reads Takeout sidecars and compares their dates with Immich:
+
+- enter `YYYY-MM-DD` to compare assets from one day;
+- leave the date empty to compare all discovered files by filename.
+
+Date changes to `dateTimeOriginal` always require confirmation, including when
+`-y` is used.
+
+## Takeout layout
+
+Album synchronization expects album directories directly under `Google Photos`,
+each with a `metadata.json`:
 
 ```text
 Takeout 2026023/
 └── Google Photos/
-    ├── My Supercool album in 2025/
+    ├── Family brunch 2025/
     │   ├── metadata.json
-    │   ├── SNY00000.jpg.supplemental-metadata.json
-    │   └── ...
-    └── Another album/
+    │   └── IMG0001.jpg.supplemental-metadata.json
+    └── Summer trip 2025/
         ├── metadata.json
         └── ...
 ```
 
-The image files are not required for this tool. The relevant metadata files
-are JSON sidecars such as:
+Image files are not required. Recognized sidecars include:
 
 - `photo.jpg.supplemental-metadata.json`
 - `photo.jpg.suppl.json`
 - `photo.jpg.suppl(1).json`
 
-## Configuration
+## Prompts and Make targets
 
-The program always reads these environment variables at startup:
-
-```shell
-export IMMICH_API_KEY="YourImmichApiKey"
-export IMMICH_API_URL="https://immich.example/api/"
-```
-
-Also set:
-
-```shell
-export IMMICH_TAKEOUT_PATH="/path/to/Takeout 2026023/Google Photos"
-```
-
-If a required variable is missing, the program prompts for it. The API URL must
-be a valid HTTP(S) URL ending in `/api` (with or without a trailing slash). The
-Takeout value must point to an existing Google Photos directory. API keys are
-never written to disk by the program.
-
-## Build and usage
-
-Clone the repository and enter its root directory:
-
-```shell
-git clone https://github.com/patrickfav/immich-sync.git
-cd immich-sync
-```
-
-Build the binary into `bin/immich-sync`:
-
-```shell
-make build
-```
-
-Run the built binary:
-
-```shell
-./bin/immich-sync
-```
-
-Or run directly from the checkout:
-
-```shell
-make run
-```
-
-The only command-line option currently supported is `-y`:
-
-```shell
-./bin/immich-sync -y
-```
-
-The equivalent Make target is:
-
-```shell
-make run ARGS="-y"
-```
-
-### Make targets
-
-Run `make help` to list the available targets:
+The supported CLI option is `-y`:
 
 ```text
-help         Show available targets
-build        Build the binary into bin/
-run          Run the program; pass CLI flags with ARGS="..."
-test         Run unit tests
-vet          Run go vet
-fmt          Format Go source files
-fmt-check    Check Go source formatting without changing files
-check        Run formatting, tests, vet, and build
-clean        Remove build artifacts
+Y or Enter  sync the current album
+n            skip the current album
+A            sync/create the current album and approve the rest
+-y           skip non-required confirmations
 ```
 
-The Make targets use the current shell environment, so `IMMICH_API_KEY`,
-`IMMICH_API_URL`, and `IMMICH_TAKEOUT_PATH` work with both `make run` and the
-built binary.
-
-The program collects and validates its configuration values, confirms the
-Immich API user, and asks whether to sync albums. Album
-synchronization asks for confirmation for each existing or new
-album:
+Useful targets:
 
 ```text
-Are you sure you want to sync this album? (Y/n/A)
+help         list targets
+build        build bin/immich-sync
+run          run the program; pass flags with ARGS="..."
+test         run unit tests
+vet          run go vet
+fmt          format Go source
+fmt-check    check Go formatting
+check        run formatting, tests, vet, and build
+clean        remove build artifacts
 ```
 
-- `Y` or Enter syncs the current album.
-- `n` skips the current album.
-- `A` syncs or creates the current album and approves all remaining album
-  actions.
-- `-y` skips non-required confirmations, including album and new-album
-  confirmation prompts.
+The Make targets use the current shell environment, so all three `IMMICH_*`
+variables work with `make run` and the built binary.
 
-If an album title from Google Photos does not exist in Immich, the program
-offers to create it with the non-empty Google Photos description and then adds
-the matching assets. The matching search happens before the create request, so
-an album is not created when zero Immich assets match. Albums with no discovered
-image metadata are skipped and are not created.
+## Metadata-only extraction
 
-Albums are processed newest first when their Takeout `metadata.json` includes a
-creation timestamp. Albums without timestamps are processed afterward in
-lexicographic order. If no album timestamps are available, all albums use
-lexicographic order.
-
-The duplicate check is based on Immich asset IDs, not filenames. This means a
-photo is skipped only when that exact Immich asset is already in the matching
-album. The album lookup is paginated, so albums larger than the API's default
-search page are also handled.
-
-The CLI uses light colors, separators, and status symbols when connected to a
-terminal. Album discovery shows the Takeout image count, confirmations include
-the number of images involved, and asset matching uses a compact progress bar.
-Album results explicitly report whether an album was created, updated,
-unchanged, or skipped. Colors and animated progress are automatically disabled
-when output is redirected. Set `NO_COLOR=1` or `TERM=dumb` to disable them
-explicitly.
-
-## Date synchronization
-
-Choose **No** at the album prompt and **Yes** at the date synchronization
-prompt. The program recursively reads metadata sidecars and then asks for a
-date:
-
-- Enter `YYYY-MM-DD` to compare the Immich assets from that day with Takeout
-  metadata.
-- Leave the date empty to compare all discovered Takeout files by filename.
-
-When a date differs, the program asks before updating Immich's
-`dateTimeOriginal`. These update prompts are required and are not skipped by
-`-y`.
-
-## Extracting only metadata from a Takeout archive
-
-The image files are unnecessary, so a large Takeout archive can be extracted
-with only its JSON metadata. On macOS with Homebrew, install 7-Zip with:
+The image files are unnecessary. On macOS with Homebrew, extract only JSON
+metadata with 7-Zip:
 
 ```shell
 brew install 7-zip
-```
-
-Homebrew provides the `7zz` executable. The `x` command preserves the archive's
-directory structure:
-
-```shell
 mkdir -p /path/to/takeout-json
 7zz x "/path/to/Google_Takeout_Photos.7z" \
-  -o"/path/to/takeout-json" \
-  -r "*.json"
-```
-
-The same command works for a `.zip` archive. After extraction, point the
-program at the nested Google Photos directory, for example:
-
-```shell
+  -o"/path/to/takeout-json" -r "*.json"
 export IMMICH_TAKEOUT_PATH="/path/to/takeout-json/Takeout 2026023/Google Photos"
 ```
 
-To inspect an archive without extracting it:
-
-```shell
-7zz l "/path/to/Google_Takeout_Photos.7z"
-```
-
-With a solid 7z archive, extracting only JSON still may require 7-Zip to read
-large portions of the archive, but it keeps the extracted output small.
+The same command works for `.zip`; use `7zz l archive.7z` to inspect an archive
+without extracting it. Solid 7z archives may still require reading a large
+part of the archive, but the extracted result remains small.
 
 ## Troubleshooting
 
 ### `No albums found`
 
-The configured path is probably too high or too low in the Takeout tree. For
-album synchronization it must contain the album directories directly, usually:
+The path is probably too high or too low. It should usually end in:
 
 ```text
 .../Takeout 2026023/Google Photos
@@ -295,37 +199,31 @@ album synchronization it must contain the album directories directly, usually:
 
 ### No assets match
 
-Check that the asset already exists in Immich and that its original filename is
-the same as the filename in the Google sidecar's `title`. Also verify that
-`IMMICH_API_URL` includes the `/api/` suffix and that the configured API key can
-search the relevant assets. Assets in an external library are usable only if
-they are returned by Immich's metadata search for that API key. This program
-does not upload the missing image.
+Confirm that the asset already exists in Immich and that its original filename
+matches the sidecar `title`. Also check the `/api/` URL suffix and API-key
+permissions. External-library assets work only when returned by Immich's
+metadata search; this tool does not upload missing images.
 
 ### HTTP 429 Too Many Requests
 
-The program waits and retries automatically. If the response includes
-`Retry-After` or `X-RateLimit-Reset`, that server-provided cooldown is used;
-all cooldowns receive random 750ms-3000ms jitter.
-Without either header, the fallback starts at one minute and backs off between
-retries. If all retries are exhausted, check the Immich reverse proxy for a
-rate-limit middleware or reduce the search concurrency in `main.go`.
+Retries are automatic and bounded. If failures continue, inspect rate limiting
+in the Immich reverse proxy and consider reducing search concurrency in
+`main.go`.
 
 ### API validation errors
 
-The Immich metadata search requires full ISO 8601 timestamps, not date-only
-values. The current program generates those timestamps automatically; an API
-URL pointing at the wrong path or an incompatible Immich version can still
-produce validation errors.
+The metadata search requires full ISO 8601 timestamps. The program generates
+them automatically, so errors usually indicate an incorrect API path or an
+incompatible Immich version.
 
 ## Development
 
-Run the unit tests, static checks, and build from the repository root:
+Run checks from the repository root:
 
 ```shell
 make check
-make build
 ```
 
-The tests focus on Takeout sidecar parsing and filesystem discovery. They do
-not contact an Immich server.
+Tests cover Takeout sidecar parsing and filesystem discovery; they do not
+contact a live Immich server. Do not run live album mutations, date updates, or
+destructive operations as part of validation.

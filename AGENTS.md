@@ -9,7 +9,9 @@ missing assets, or delete album members.
 
 ## Project structure
 
-- `main.go` contains the CLI, validation, and Immich API operations.
+- `main.go` contains the CLI, configuration, and sync orchestration.
+- `immich_client.go` contains Immich API models, HTTP handling, pagination,
+  matching queries, and rate-limit handling.
 - `google_takeout.go` adapts Takeout data to the shared matching engine.
 - `*_test.go` contains focused unit tests for local metadata parsing and
   filesystem discovery.
