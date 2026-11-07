@@ -30,9 +30,11 @@ type ImmichAlbumAsset struct {
 }
 
 type ImmichAssetAssets struct {
-	Total int           `json:"total"`
-	Count int           `json:"count"`
-	Items []ImmichAsset `json:"items"`
+	Total      int           `json:"total"`
+	Count      int           `json:"count"`
+	Items      []ImmichAsset `json:"items"`
+	NextPage   *string       `json:"nextPage"`
+	NextCursor *string       `json:"nextCursor"`
 }
 
 type ImmichAsset struct {
@@ -46,12 +48,6 @@ type ImmichAsset struct {
 type Album struct {
 	AlbumName string `json:"albumName"`
 	ID        string `json:"id"`
-	OwnerID   string `json:"ownerId"`
-	Assets    []struct {
-		ID               string `json:"id"`
-		OriginalFileName string `json:"originalFileName"`
-		OriginalMimeType string `json:"originalMimeType"`
-	} `json:"assets"`
 }
 
 type TakeoutFile struct {
@@ -192,6 +188,17 @@ func AlbumConfirmation(label string) (confirm bool, approveAll bool) {
 	}
 }
 
+func confirmAlbumAction(label string) bool {
+	if approveAllAlbums {
+		return true
+	}
+	ok, approveAll := AlbumConfirmation(label)
+	if approveAll {
+		approveAllAlbums = true
+	}
+	return ok
+}
+
 func UserInput(label string, def string, required bool) string {
 	var s string
 
@@ -229,6 +236,15 @@ func getAlbums() (albums []Album, err error) {
 	}
 	fmt.Printf("Total albums: %d\n", len(albums))
 	return albums, nil
+}
+
+func findAlbumByName(albums []Album, albumName string) (Album, bool) {
+	for _, album := range albums {
+		if album.AlbumName == albumName {
+			return album, true
+		}
+	}
+	return Album{}, false
 }
 
 func readFiles(readAll bool) {
@@ -344,6 +360,42 @@ func findAssetByFilename(filename string, createdAfter string, createdBefore str
 		return
 	}
 	return response.Assets.Items
+}
+
+func getAlbumAssets(albumID string) ([]ImmichAsset, error) {
+	var assets []ImmichAsset
+	page := 1
+
+	for {
+		payload := struct {
+			AlbumIDs []string `json:"albumIds"`
+			Page     int      `json:"page"`
+			Size     int      `json:"size"`
+		}{AlbumIDs: []string{albumID}, Page: page, Size: 1000}
+
+		body, err := getJSONData("search/metadata", "POST", payload)
+		if err != nil {
+			return nil, err
+		}
+
+		var response ImmichAlbumAsset
+		if err := json.Unmarshal(body, &response); err != nil {
+			return nil, fmt.Errorf("invalid Immich album assets response: %w", err)
+		}
+		assets = append(assets, response.Assets.Items...)
+
+		if response.Assets.NextPage == nil || *response.Assets.NextPage == "" {
+			return assets, nil
+		}
+		nextPage, err := strconv.Atoi(*response.Assets.NextPage)
+		if err != nil {
+			return nil, fmt.Errorf("invalid nextPage in Immich album assets response: %w", err)
+		}
+		if nextPage <= page {
+			return nil, fmt.Errorf("invalid nextPage %d in Immich album assets response", nextPage)
+		}
+		page = nextPage
+	}
 }
 
 func findAssetsByDate(date string) (assets []ImmichAsset) {
@@ -466,64 +518,59 @@ func syncFilesByDate(date string) {
 
 func syncAlbum(album Album, files []TakeoutFile, override bool) {
 	fmt.Println("Syncing album: " + album.AlbumName)
-	if !override && !approveAllAlbums {
-		ok, approveAll := AlbumConfirmation("Are you sure you want to sync this album?")
-		if approveAll {
-			approveAllAlbums = true
-		}
-		if !ok {
-			return
-		}
+	if !override && !confirmAlbumAction("Are you sure you want to sync this album?") {
+		return
 	}
-	body, err := getData("albums/"+album.ID, "GET", "")
+	immichAssets, err := getAlbumAssets(album.ID)
 	if err != nil {
 		fmt.Println(err)
 		return
 	}
-	newAssets := []string{}
-	var immichAlbum Album
-	if err := json.Unmarshal(body, &immichAlbum); err != nil {
-		fmt.Println("Invalid album response:", err)
-		return
+	existingAssetIDs := make(map[string]struct{}, len(immichAssets))
+	for _, asset := range immichAssets {
+		existingAssetIDs[asset.ID] = struct{}{}
 	}
+	fmt.Printf("Found %d existing assets in %s\n", len(existingAssetIDs), album.AlbumName)
+
+	newAssets := []string{}
+	newAssetIDs := make(map[string]struct{})
 	notFound := 0
+	skipped := 0
 	fmt.Print("Searching files ")
 	for _, file := range files {
-		found := false
-		for _, asset := range immichAlbum.Assets {
-			if asset.OriginalFileName == file.Filename {
-				found = true
-				break
-			}
+		fmt.Print(".")
+		createdAfterTimestamp, err1 := strconv.ParseInt(file.PhotoTakenTime, 10, 64)
+		createdBeforeTimestamp, err2 := strconv.ParseInt(file.CreationTime, 10, 64)
+		if err1 != nil || err2 != nil {
+			fmt.Println("Error parsing timestamp:", err1, err2)
+			return
 		}
-		if !found {
-			fmt.Print(".")
-			createdAfterTimestamp, err1 := strconv.ParseInt(file.PhotoTakenTime, 10, 64)
-			createdBeforeTimestamp, err2 := strconv.ParseInt(file.CreationTime, 10, 64)
-			if err1 != nil || err2 != nil {
-				fmt.Println("Error parsing timestamp:", err1, err2)
-				return
-			}
-			tm1 := time.Unix(createdAfterTimestamp, 0)
-			tm2 := time.Unix(createdBeforeTimestamp, 0)
-			createdAfter := tm1.Add(-24 * time.Hour).UTC().Format(time.RFC3339)
-			createdBefore := tm2.Add(24 * time.Hour).UTC().Format(time.RFC3339)
+		tm1 := time.Unix(createdAfterTimestamp, 0)
+		tm2 := time.Unix(createdBeforeTimestamp, 0)
+		createdAfter := tm1.Add(-24 * time.Hour).UTC().Format(time.RFC3339)
+		createdBefore := tm2.Add(24 * time.Hour).UTC().Format(time.RFC3339)
 
-			assets := findAssetByFilename(file.Filename, createdAfter, createdBefore)
-			if len(assets) == 0 {
-				notFound++
-			}
-			var ids []string
-			for _, asset := range assets {
-				ids = append(ids, asset.ID)
-
-			}
-
-			newAssets = append(newAssets, ids...)
+		assets := findAssetByFilename(file.Filename, createdAfter, createdBefore)
+		if len(assets) == 0 {
+			notFound++
 			continue
+		}
+		for _, asset := range assets {
+			if _, ok := existingAssetIDs[asset.ID]; ok {
+				skipped++
+				continue
+			}
+			if _, ok := newAssetIDs[asset.ID]; ok {
+				continue
+			}
+			newAssetIDs[asset.ID] = struct{}{}
+			newAssets = append(newAssets, asset.ID)
 		}
 	}
 	fmt.Println(" Done")
+	if skipped > 0 {
+		fmt.Printf("Skipped %d assets already in %s\n", skipped, album.AlbumName)
+	}
 	if len(newAssets) > 0 {
 		body, err := getJSONData("albums/"+album.ID+"/assets", "PUT", struct {
 			IDs []string `json:"ids"`
@@ -560,8 +607,7 @@ func syncAlbum(album Album, files []TakeoutFile, override bool) {
 
 func createAlbum(albumName string, files []TakeoutFile) {
 	fmt.Println("Creating album: " + albumName)
-	ok := YesNoPrompt("Are you sure you want to create this album?", true, false)
-	if !ok {
+	if !confirmAlbumAction("Are you sure you want to create this album?") {
 		return
 	}
 	body, err := getJSONData("albums", "POST", struct {
@@ -660,15 +706,9 @@ func main() {
 			return
 		}
 		for albumName, files := range takeout {
-			foundAlbum := false
-			for _, album := range albums {
-				if album.AlbumName == albumName {
-					syncAlbum(album, files, false)
-					foundAlbum = true
-					break
-				}
-			}
-			if !foundAlbum {
+			if album, found := findAlbumByName(albums, albumName); found {
+				syncAlbum(album, files, false)
+			} else {
 				createAlbum(albumName, files)
 			}
 		}

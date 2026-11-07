@@ -31,8 +31,10 @@ For album synchronization, assets are searched in Immich by:
 
 The image contents are never compared. Duplicate filenames can therefore
 produce an ambiguous or incorrect match, especially when different photos
-were taken close together. Existing album members are preserved; the program
-only appends missing assets and does not remove anything.
+were taken close together. When an Immich album with the same name already
+exists, the program reads its current asset IDs through the album-scoped
+metadata search, skips those IDs, and appends only missing assets. Existing
+album members are preserved and nothing is removed.
 
 ## Requirements
 
@@ -136,7 +138,8 @@ immich-sync -y
 ```
 
 The program first confirms the Immich API user, then asks whether to sync
-albums. Album synchronization asks for confirmation for each existing album:
+albums. Album synchronization asks for confirmation for each existing or new
+album:
 
 ```text
 Are you sure you want to sync this album? (Y/n/A)
@@ -144,12 +147,18 @@ Are you sure you want to sync this album? (Y/n/A)
 
 - `Y` or Enter syncs the current album.
 - `n` skips the current album.
-- `A` syncs the current album and approves all remaining existing albums.
+- `A` syncs or creates the current album and approves all remaining album
+  actions.
 - `-y` skips non-required confirmations, including album and new-album
   confirmation prompts.
 
 If an album title from Google Photos does not exist in Immich, the program
 offers to create it and then adds the matching assets.
+
+The duplicate check is based on Immich asset IDs, not filenames. This means a
+photo is skipped only when that exact Immich asset is already in the matching
+album. The album lookup is paginated, so albums larger than the API's default
+search page are also handled.
 
 ## Date synchronization
 

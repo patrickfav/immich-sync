@@ -39,6 +39,10 @@ import missing assets, or delete album members.
 - Asset matching uses the exact original filename plus a timestamp window. Do
   not replace this with content matching without documenting the behavior and
   adding tests for ambiguous filenames.
+- Existing album membership is read with `POST /search/metadata` filtered by
+  the album ID. Do not rely on `GET /albums/:id` returning an `assets` array;
+  current Immich API responses omit that field. Add only asset IDs that are
+  not already in the album and preserve all existing members.
 
 ## Development workflow
 
@@ -69,7 +73,8 @@ When changing API requests:
 When changing prompts or CLI behavior, update `README.md` and add or update
 tests where the behavior can be tested without a terminal or live server.
 The current supported CLI option is `-y`; the album prompt also supports `A`
-to approve the current and remaining existing albums.
+to approve the current and remaining album actions, including new album
+creation.
 
 Do not perform live album mutations, date updates, or destructive repository
 operations as part of validation unless explicitly requested.
