@@ -14,12 +14,6 @@ In both places you have similar set of assets, and want to organize your hi-rez 
 
 You don't want to re-import the whole library every time you download Google Takeout, you just want to sync your albums every now and then.
 
-### Support Immich sync
-
-Become [GitHub Sponsor](https://github.com/sponsors/web-gears)
-
-Support with [PayPal](https://www.paypal.com/donate/?business=8879BAAHSFANQ&no_recurring=0&currency_code=USD)
-
 ## How to use
 
 ### Prerequisites
