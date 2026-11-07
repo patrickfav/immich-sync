@@ -1,4 +1,4 @@
-# Google Photos album sync for Immich
+# Google Photos Album Sync for Immich (without image copy)
 
 ## Fork and improvements
 
