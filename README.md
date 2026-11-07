@@ -1,5 +1,30 @@
 # Google Photos album sync for Immich
 
+## Fork and improvements
+
+This repository is a maintained fork of
+[web-gears/immich-sync](https://github.com/web-gears/immich-sync). It keeps the
+original purpose—recreating Google Photos album membership in Immich when the
+assets are already present—while making the sync safer, more predictable, and
+easier to operate.
+
+Compared with the original implementation, this fork adds or improves:
+
+- deterministic album ordering, with newest albums first when dated;
+- album merging by Immich asset ID without deleting existing members;
+- filename-and-timestamp matching with pagination, caching, and bounded
+  concurrency;
+- pre-creation matching so empty or completely unmatched albums are never
+  created;
+- Google album descriptions copied to newly created Immich albums;
+- metadata-only Google Takeout support, including sidecar filename variants;
+- API URL and Takeout structure validation with clear startup errors;
+- bounded HTTP 429 retries honoring server cooldown headers plus randomized
+  750ms–3000ms jitter;
+- clearer terminal output, the `A` approve-all option, and explicit album
+  created/updated/unchanged/skipped statuses;
+- focused unit tests, a Makefile, and expanded project documentation.
+
 ## Description
 
 `immich-sync` copies album membership from a Google Photos Takeout into an
