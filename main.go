@@ -7,6 +7,7 @@ import (
 	"flag"
 	"fmt"
 	"io"
+	"math/rand"
 	"net/http"
 	"net/url"
 	"os"
@@ -82,7 +83,8 @@ const (
 	maxRateLimitRetries          = 5
 	defaultRateLimitCooldown     = time.Minute
 	maxFallbackRateLimitCooldown = 5 * time.Minute
-	retryAfterSafetyBuffer       = time.Second
+	minRateLimitJitter            = 750 * time.Millisecond
+	maxRateLimitJitter            = 3 * time.Second
 )
 
 func readJSONFile(path string, value any) error {
@@ -280,37 +282,42 @@ func setRateLimitCooldown(delay time.Duration) {
 	}
 }
 
+func addRateLimitJitter(delay time.Duration) time.Duration {
+	jitterRange := int64(maxRateLimitJitter - minRateLimitJitter + time.Nanosecond)
+	return delay + minRateLimitJitter + time.Duration(rand.Int63n(jitterRange))
+}
+
 func rateLimitDelay(headers http.Header, attempt int, now time.Time) (time.Duration, string) {
 	if retryAfter := strings.TrimSpace(headers.Get("Retry-After")); retryAfter != "" {
 		if seconds, err := strconv.ParseInt(retryAfter, 10, 64); err == nil && seconds >= 0 {
-			return time.Duration(seconds)*time.Second + retryAfterSafetyBuffer, "Retry-After"
+			return addRateLimitJitter(time.Duration(seconds) * time.Second), "Retry-After"
 		}
 		if retryAt, err := http.ParseTime(retryAfter); err == nil {
 			delay := retryAt.Sub(now)
 			if delay < 0 {
 				delay = 0
 			}
-			return delay + retryAfterSafetyBuffer, "Retry-After"
+			return addRateLimitJitter(delay), "Retry-After"
 		}
 	}
 
 	if reset := strings.TrimSpace(headers.Get("X-RateLimit-Reset")); reset != "" {
 		if seconds, err := strconv.ParseInt(reset, 10, 64); err == nil {
 			if delay := time.Unix(seconds, 0).Sub(now); delay > 0 {
-				return delay, "X-RateLimit-Reset"
+				return addRateLimitJitter(delay), "X-RateLimit-Reset"
 			}
-			return 0, "X-RateLimit-Reset"
+			return addRateLimitJitter(0), "X-RateLimit-Reset"
 		}
 	}
 
 	delay := defaultRateLimitCooldown
 	for range attempt {
 		if delay >= maxFallbackRateLimitCooldown/2 {
-			return maxFallbackRateLimitCooldown, "fallback"
+			return addRateLimitJitter(maxFallbackRateLimitCooldown), "fallback"
 		}
 		delay *= 2
 	}
-	return delay, "fallback"
+	return addRateLimitJitter(delay), "fallback"
 }
 
 func getData(path string, method string, payload string) ([]byte, error) {

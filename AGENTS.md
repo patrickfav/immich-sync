@@ -49,8 +49,9 @@ import missing assets, or delete album members.
   goroutine.
 - Handle Immich HTTP 429 responses centrally. Honor `Retry-After` and
   `X-RateLimit-Reset` when provided, use bounded exponential fallback cooldowns
-  otherwise, and coordinate the cooldown across concurrent requests. Do not
-  turn a rate-limit response into an unbounded retry loop.
+  otherwise, add 750ms-3000ms of random jitter, and coordinate the cooldown
+  across concurrent requests. Do not turn a rate-limit response into an
+  unbounded retry loop.
 - Process albums deterministically: use descending Takeout album date
   timestamps when available, then lexicographic order for ties or undated
   albums. Never range over the album map directly for sync order.

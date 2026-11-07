@@ -434,8 +434,8 @@ func TestAPIEndpointNormalizesSlashes(t *testing.T) {
 func TestRateLimitDelayHonorsServerHeaders(t *testing.T) {
 	now := time.Date(2026, time.November, 7, 12, 0, 0, 0, time.UTC)
 
-	if got, source := rateLimitDelay(http.Header{"Retry-After": []string{"3"}}, 0, now); got != 4*time.Second || source != "Retry-After" {
-		t.Fatalf("rateLimitDelay() = %s, %q; want 4s, Retry-After including safety buffer", got, source)
+	if got, source := rateLimitDelay(http.Header{"Retry-After": []string{"3"}}, 0, now); got < 3*time.Second+minRateLimitJitter || got > 3*time.Second+maxRateLimitJitter || source != "Retry-After" {
+		t.Fatalf("rateLimitDelay() = %s, %q; want 3s plus 750ms-3s jitter", got, source)
 	}
 
 	reset := now.Add(17 * time.Second).Unix()
@@ -443,11 +443,11 @@ func TestRateLimitDelayHonorsServerHeaders(t *testing.T) {
 		t.Fatalf("rateLimitDelay() = %s, %q; want 17s, X-RateLimit-Reset", got, source)
 	}
 
-	if got, source := rateLimitDelay(nil, 0, now); got != time.Minute || source != "fallback" {
-		t.Fatalf("rateLimitDelay() fallback = %s, %q; want 1m, fallback", got, source)
+	if got, source := rateLimitDelay(nil, 0, now); got < time.Minute+minRateLimitJitter || got > time.Minute+maxRateLimitJitter || source != "fallback" {
+		t.Fatalf("rateLimitDelay() fallback = %s, %q; want 1m plus 750ms-3s jitter", got, source)
 	}
-	if got, _ := rateLimitDelay(nil, 1, now); got != 2*time.Minute {
-		t.Fatalf("rateLimitDelay() second fallback = %s, want 2m", got)
+	if got, _ := rateLimitDelay(nil, 1, now); got < 2*time.Minute+minRateLimitJitter || got > 2*time.Minute+maxRateLimitJitter {
+		t.Fatalf("rateLimitDelay() second fallback = %s, want 2m plus 750ms-3s jitter", got)
 	}
 }
 
