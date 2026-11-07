@@ -22,7 +22,8 @@ import missing assets, or delete album members.
   takes precedence over environment variables.
 - Otherwise use `IMMICH_API_KEY`, `IMMICH_API_URL`, and optionally
   `IMMICH_TAKEOUT_PATH`.
-- `IMMICH_API_URL` must include the `/api/` suffix and a trailing slash.
+- `IMMICH_API_URL` must include the `/api/` suffix; the program normalizes the
+  trailing slash.
 - Never commit, print, or log API keys. Keep local configuration files
   private and use restrictive permissions such as `chmod 600 config.json`.
 - Do not add real Takeout metadata, image files, logs, or extracted archives to
@@ -43,6 +44,10 @@ import missing assets, or delete album members.
   the album ID. Do not rely on `GET /albums/:id` returning an `assets` array;
   current Immich API responses omit that field. Add only asset IDs that are
   not already in the album and preserve all existing members.
+- Album asset searches may use the bounded worker pool and per-run query cache
+  in `main.go`. Keep the concurrency limit conservative, preserve Takeout
+  ordering when constructing asset IDs, and keep progress output in the main
+  goroutine.
 - Process albums deterministically: use descending Takeout album date
   timestamps when available, then lexicographic order for ties or undated
   albums. Never range over the album map directly for sync order.
@@ -74,7 +79,8 @@ When changing API requests:
 - keep JSON payloads typed and valid;
 - use full RFC 3339 timestamps for Immich datetime filters;
 - preserve non-2xx response errors so configuration and API failures are
-  visible to the user; and
+-  visible to the user;
+- keep API requests bounded by the shared HTTP client timeout; and
 - avoid logging credentials or response data that may contain sensitive
   information.
 

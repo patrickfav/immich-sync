@@ -36,6 +36,10 @@ exists, the program reads its current asset IDs through the album-scoped
 metadata search, skips those IDs, and appends only missing assets. Existing
 album members are preserved and nothing is removed.
 
+Album matching caches identical filename/time-window searches and performs up
+to six unique Immich lookups concurrently. The result order is still based on
+the deterministic Takeout file order.
+
 When creating a new Immich album, the non-empty Google album description is
 copied to it. Albums with no discovered photo metadata are reported with a
 warning and are not created.
@@ -44,8 +48,8 @@ warning and are not created.
 
 - Go 1.27.3 or newer
 - An Immich API key with permission to search assets and modify albums
-- An Immich API URL ending in `/api/`, for example
-  `https://immich.example/api/`
+- An Immich API URL including the `/api/` path, for example
+  `https://immich.example/api/`; a missing trailing slash is normalized
 - A Google Photos Takeout directory containing the extracted metadata
 
 The program is run from a checkout or built with Go. The repository includes a
@@ -201,8 +205,10 @@ search page are also handled.
 The CLI uses light colors, separators, and status symbols when connected to a
 terminal. Album discovery shows the Takeout image count, confirmations include
 the number of images involved, and asset matching uses a compact progress bar.
-Colors and animated progress are automatically disabled when output is
-redirected. Set `NO_COLOR=1` or `TERM=dumb` to disable them explicitly.
+Album results explicitly report whether an album was created, updated,
+unchanged, or skipped. Colors and animated progress are automatically disabled
+when output is redirected. Set `NO_COLOR=1` or `TERM=dumb` to disable them
+explicitly.
 
 ## Date synchronization
 

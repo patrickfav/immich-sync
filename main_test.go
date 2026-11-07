@@ -3,11 +3,13 @@ package main
 import (
 	"bufio"
 	"encoding/json"
+	"fmt"
 	"net/http"
 	"net/http/httptest"
 	"os"
 	"path/filepath"
 	"strings"
+	"sync/atomic"
 	"testing"
 )
 
@@ -94,10 +96,13 @@ func TestReadFilesDiscoversAlbumSidecars(t *testing.T) {
   "creationTime": {"timestamp": "1760044090"},
   "photoTakenTime": {"timestamp": "1759504776"}
 }`)
+	writeTestFile(t, filepath.Join(albumPath, "not-a-photo.json"), `{"title":"should-not-be-imported"}`)
 
 	takeout = nil
 	takeoutPath = root
-	readFiles(false)
+	if err := readFiles(false); err != nil {
+		t.Fatalf("readFiles() failed: %v", err)
+	}
 
 	files := takeout["Auf Kreta mit Theo #2025"]
 	if len(files) != 1 {
@@ -132,7 +137,9 @@ func TestReadAllDirSupportsGoogleSidecarVariants(t *testing.T) {
 	writeTestFile(t, filepath.Join(root, "nested", "three.jpg.suppl(1).json"), metadata)
 
 	takeoutFiles = nil
-	readAllDir(root)
+	if err := readAllDir(root); err != nil {
+		t.Fatalf("readAllDir() failed: %v", err)
+	}
 
 	got := make(map[string]bool, len(takeoutFiles))
 	for _, file := range takeoutFiles {
@@ -222,11 +229,14 @@ func TestConfirmAlbumActionApprovesRemainingAlbums(t *testing.T) {
 
 func TestSyncAlbumAddsOnlyMissingAssets(t *testing.T) {
 	oldAPIURL, oldAPIKey, oldHTTPClient := apiURL, apiKey, httpClient
+	oldAssetSearchCache := assetSearchCache
 	t.Cleanup(func() {
 		apiURL, apiKey, httpClient = oldAPIURL, oldAPIKey, oldHTTPClient
+		assetSearchCache = oldAssetSearchCache
 	})
 
 	var addedIDs []string
+	var filenameSearches atomic.Int32
 	server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
 		if r.URL.Path != "/search/metadata" && r.URL.Path != "/albums/album-id/assets" {
 			t.Fatalf("unexpected request path %s", r.URL.Path)
@@ -256,8 +266,11 @@ func TestSyncAlbumAddsOnlyMissingAssets(t *testing.T) {
 		}
 		filename := payload["originalFileName"]
 		if filename == "already.jpg" {
-			t.Fatalf("looked up an asset that was already in the album")
+			_, _ = w.Write([]byte(`{"assets":{"total":1,"count":1,"items":[{"id":"existing-id","originalFileName":"already.jpg"}]}}`))
+			filenameSearches.Add(1)
+			return
 		}
+		filenameSearches.Add(1)
 		_, _ = w.Write([]byte(`{"assets":{"total":1,"count":1,"items":[{"id":"new-id","originalFileName":"new.jpg"}]}}`))
 	}))
 	defer server.Close()
@@ -269,10 +282,14 @@ func TestSyncAlbumAddsOnlyMissingAssets(t *testing.T) {
 	syncAlbum(Album{ID: "album-id", AlbumName: "Holiday"}, []TakeoutFile{
 		{Filename: "already.jpg", CreationTime: "1700000000", PhotoTakenTime: "1700000000"},
 		{Filename: "new.jpg", CreationTime: "1700000000", PhotoTakenTime: "1700000000"},
+		{Filename: "new.jpg", CreationTime: "1700000000", PhotoTakenTime: "1700000000"},
 	}, true)
 
 	if len(addedIDs) != 1 || addedIDs[0] != "new-id" {
 		t.Fatalf("added asset IDs = %v, want [new-id]", addedIDs)
+	}
+	if got := filenameSearches.Load(); got != 2 {
+		t.Fatalf("filename search requests = %d, want 2 for two unique queries", got)
 	}
 }
 
@@ -304,9 +321,11 @@ func TestCreateAlbumSkipsEmptyAlbum(t *testing.T) {
 func TestCreateAlbumSendsDescription(t *testing.T) {
 	oldAPIURL, oldAPIKey, oldHTTPClient := apiURL, apiKey, httpClient
 	oldApproveAllAlbums := approveAllAlbums
+	oldAssetSearchCache := assetSearchCache
 	t.Cleanup(func() {
 		apiURL, apiKey, httpClient = oldAPIURL, oldAPIKey, oldHTTPClient
 		approveAllAlbums = oldApproveAllAlbums
+		assetSearchCache = oldAssetSearchCache
 	})
 
 	var description string
@@ -353,5 +372,75 @@ func TestCreateAlbumSendsDescription(t *testing.T) {
 
 	if description != "A day in Crete" {
 		t.Fatalf("created album description = %q, want %q", description, "A day in Crete")
+	}
+}
+
+func TestAPIEndpointNormalizesSlashes(t *testing.T) {
+	oldAPIURL := apiURL
+	t.Cleanup(func() { apiURL = oldAPIURL })
+
+	apiURL = "https://immich.example/api///"
+	got, err := apiEndpoint("/search/metadata")
+	if err != nil {
+		t.Fatalf("apiEndpoint() returned an error: %v", err)
+	}
+	if got != "https://immich.example/api/search/metadata" {
+		t.Fatalf("apiEndpoint() = %q, want normalized endpoint", got)
+	}
+}
+
+func TestFindAssetsByDatePaginates(t *testing.T) {
+	oldAPIURL, oldAPIKey, oldHTTPClient := apiURL, apiKey, httpClient
+	t.Cleanup(func() {
+		apiURL, apiKey, httpClient = oldAPIURL, oldAPIKey, oldHTTPClient
+	})
+
+	var pages []int
+	server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		if r.URL.Path != "/search/metadata" || r.Method != http.MethodPost {
+			t.Fatalf("unexpected request: %s %s", r.Method, r.URL.Path)
+		}
+		var payload struct {
+			Page int `json:"page"`
+		}
+		if err := json.NewDecoder(r.Body).Decode(&payload); err != nil {
+			t.Fatalf("decode search request: %v", err)
+		}
+		pages = append(pages, payload.Page)
+		w.Header().Set("Content-Type", "application/json")
+		if payload.Page == 1 {
+			_, _ = w.Write([]byte(`{"assets":{"total":2,"count":1,"items":[{"id":"first"}],"nextPage":"2"}}`))
+			return
+		}
+		_, _ = w.Write([]byte(`{"assets":{"total":2,"count":1,"items":[{"id":"second"}]}}`))
+	}))
+	defer server.Close()
+
+	apiURL = server.URL
+	apiKey = "test-key"
+	httpClient = server.Client()
+
+	assets, err := findAssetsByDate("2025-10-03")
+	if err != nil {
+		t.Fatalf("findAssetsByDate() returned an error: %v", err)
+	}
+	if len(assets) != 2 || assets[0].ID != "first" || assets[1].ID != "second" {
+		t.Fatalf("findAssetsByDate() = %#v, want both pages", assets)
+	}
+	if len(pages) != 2 || strings.Join([]string{fmt.Sprint(pages[0]), fmt.Sprint(pages[1])}, ",") != "1,2" {
+		t.Fatalf("requested pages = %v, want [1 2]", pages)
+	}
+}
+
+func TestParseTakeoutTimestampUsesFallback(t *testing.T) {
+	got, err := parseTakeoutTimestamp("", "1760044090")
+	if err != nil {
+		t.Fatalf("parseTakeoutTimestamp() returned an error: %v", err)
+	}
+	if got != 1760044090 {
+		t.Fatalf("parseTakeoutTimestamp() = %d, want 1760044090", got)
+	}
+	if _, err := parseTakeoutTimestamp("bad", ""); err == nil {
+		t.Fatal("parseTakeoutTimestamp() accepted invalid timestamps")
 	}
 }
