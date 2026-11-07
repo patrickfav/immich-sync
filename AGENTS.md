@@ -58,9 +58,12 @@ missing assets, or delete album members.
   timestamps when available, then lexicographic order for ties or undated
   albums. Never range over the album map directly for sync order.
 - Copy a non-empty Google album description only when creating a new Immich
-  album. Skip empty Takeout albums with a warning; resolve matching Immich
-  assets before creating a new album, and never create one when zero assets
-  match.
+  album. Skip empty Takeout albums with a warning unless the threshold is 0;
+  resolve matching Immich
+  assets before creating a new album. By default, create a partially matched
+  album only when at least three images match; ask for a startup threshold from
+  0 through 100. Create a fully matched album regardless of the threshold, and
+  allow a threshold of 0 to create empty or completely unmatched albums.
 
 ## Development workflow
 
@@ -100,7 +103,8 @@ When changing prompts or CLI behavior, update `README.md` and add or update
 tests where the behavior can be tested without a terminal or live server.
 The current supported CLI option is `-y`; the album prompt also supports `A`
 to approve the current and remaining album actions, including new album
-creation.
+creation. Album synchronization ends with a summary counting created, updated,
+unchanged, and skipped albums plus successfully added assets.
 - Keep CLI decoration restrained: use the standard library, short status
   symbols, and simple separators. Preserve readable plain output when stdout
   is redirected or `NO_COLOR`/`TERM=dumb` disables ANSI colors.

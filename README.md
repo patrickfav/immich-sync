@@ -33,6 +33,13 @@ directory itself—not the outer `Takeout ...` directory. API keys are never
 written to disk by the program. Missing required values are requested
 interactively.
 
+During album synchronization, the program asks for the minimum number of
+matched Immich images required before creating a new album. The default is 3,
+and values from 0 to 100 are accepted. This threshold only applies when some
+Takeout images do not match; an album whose entire Takeout contents match is
+created regardless of the threshold. Setting the threshold to 0 also allows
+empty or completely unmatched albums to be created.
+
 Build and run the binary instead:
 
 ```shell
@@ -53,6 +60,7 @@ go run .
 ────────────────────────────────────────────────────────
 ? Are you Alex Example? (y/N) y
 ? Do you want to sync your albums? (Y/n) y
+? Minimum matched images for new albums (0-100) (default: 3):
 
 📦 Google Takeout
 ────────────────────────────────────────────────────────
@@ -72,6 +80,16 @@ go run .
 ────────────────────────────────────────────────────────
 ? Sync 215 Takeout images into this album? (Y/n) y
 ✓ Updated album: added 215 assets
+
+✓ Album synchronization complete
+
+📊 Sync summary
+────────────────────────────────────────────────────────
+  [+]  Albums created       │      1
+  [~]  Albums updated       │      4
+  [=]  Albums unchanged     │      7
+  [!]  Albums skipped       │      0
+  [+]  New assets added     │    215
 ```
 
 When output is redirected, or `NO_COLOR=1` / `TERM=dumb` is set, colors and
@@ -99,10 +117,12 @@ deterministic.
 Albums are processed newest first when their `metadata.json` has a creation
 timestamp, then lexicographically for ties or undated albums. A non-empty
 Google album description is copied only when a new Immich album is created.
-Empty albums and albums with no matching Immich assets are skipped rather than
-created.
+By default, empty albums and albums with fewer than three matching Immich
+assets are skipped rather than created when some Takeout images are unmatched.
+The threshold can be changed at startup; a threshold of 0 allows empty albums.
 
-The CLI reports `created`, `updated`, `unchanged`, and `skipped` outcomes. It
+The CLI ends album synchronization with a summary of `created`, `updated`,
+`unchanged`, and `skipped` albums plus the number of newly added assets. It
 also handles HTTP 429 responses centrally: it honors `Retry-After` and
 `X-RateLimit-Reset`, adds 750–3000 ms of random jitter, coordinates cooldowns
 across concurrent requests, and stops after five bounded retries. If no server
@@ -151,6 +171,8 @@ Y or Enter  sync the current album
 n            skip the current album
 A            sync/create the current album and approve the rest
 -y           skip non-required confirmations
+
+The startup threshold prompt accepts a number from 0 to 100 and defaults to 3.
 ```
 
 Useful targets:

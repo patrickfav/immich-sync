@@ -7,15 +7,28 @@ import (
 	"fmt"
 	"net/http"
 	"os"
+	"strconv"
 	"strings"
 	"time"
 )
 
 var (
-	suppressConfirmation = false
-	approveAllAlbums     = false
-	stdinReader          = bufio.NewReader(os.Stdin)
+	suppressConfirmation    = false
+	approveAllAlbums        = false
+	minimumMatchedImages    = defaultMinimumMatchedImages
+	runSummary              syncSummary
+	stdinReader             = bufio.NewReader(os.Stdin)
 )
+
+const defaultMinimumMatchedImages = 3
+
+type syncSummary struct {
+	AlbumsCreated   int
+	AlbumsUpdated   int
+	AlbumsUnchanged int
+	AlbumsSkipped   int
+	AssetsAdded     int
+}
 
 const (
 	ansiReset  = "\033[0m"
@@ -211,6 +224,47 @@ func UserInput(label string, def string, required bool) (string, bool) {
 	}
 }
 
+func minimumMatchedImagesPrompt() (int, bool) {
+	for {
+		value, ok := UserInput("Minimum matched images for new albums (0-100)", strconv.Itoa(defaultMinimumMatchedImages), true)
+		if !ok {
+			return 0, false
+		}
+		threshold, err := strconv.Atoi(value)
+		if err == nil && threshold >= 0 && threshold <= 100 {
+			return threshold, true
+		}
+		warning("Please enter a whole number between 0 and 100")
+	}
+}
+
+func albumMeetsCreationThreshold(totalImages int, matchedImages int, threshold int) bool {
+	if totalImages == 0 {
+		return threshold == 0
+	}
+	return matchedImages == totalImages || matchedImages >= threshold
+}
+
+func printSyncSummary() {
+	section("📊", "Sync summary")
+	rows := []struct {
+		icon  string
+		label string
+		value int
+		color string
+	}{
+		{icon: "[+]", label: "Albums created", value: runSummary.AlbumsCreated, color: ansiGreen},
+		{icon: "[~]", label: "Albums updated", value: runSummary.AlbumsUpdated, color: ansiCyan},
+		{icon: "[=]", label: "Albums unchanged", value: runSummary.AlbumsUnchanged, color: ansiDim},
+		{icon: "[!]", label: "Albums skipped", value: runSummary.AlbumsSkipped, color: ansiYellow},
+		{icon: "[+]", label: "New assets added", value: runSummary.AssetsAdded, color: ansiGreen},
+	}
+	for _, row := range rows {
+		value := colorize(row.color, fmt.Sprintf("%6d", row.value))
+		fmt.Printf("  %-3s  %-20s │ %s\n", colorize(row.color, row.icon), row.label, value)
+	}
+}
+
 func syncAssetDate(file TakeoutFile, asset ImmichAsset) {
 	tm, err := takeoutPhotoTime(file)
 	if err != nil {
@@ -308,15 +362,18 @@ func findAlbumAssetIDs(files []TakeoutFile) ([]string, int, error) {
 	queries := make([]assetSearchQuery, 0, len(files))
 	uniqueQueries := make([]assetSearchQuery, 0, len(files))
 	seenQueries := make(map[assetSearchQuery]struct{}, len(files))
+	notFound := 0
 	for _, file := range files {
 		createdAfterTimestamp, err := parseTakeoutTimestamp(file.PhotoTakenTime, file.CreationTime)
 		if err != nil {
 			warning("Skipping %s: invalid photo timestamp: %v", file.Filename, err)
+			notFound++
 			continue
 		}
 		createdBeforeTimestamp, err := parseTakeoutTimestamp(file.CreationTime, file.PhotoTakenTime)
 		if err != nil {
 			warning("Skipping %s: invalid creation timestamp: %v", file.Filename, err)
+			notFound++
 			continue
 		}
 		tm1 := time.Unix(createdAfterTimestamp, 0)
@@ -358,22 +415,22 @@ func findAlbumAssetIDs(files []TakeoutFile) ([]string, int, error) {
 
 	matchedAssetIDs := make([]string, 0)
 	matchedAssetIDsSet := make(map[string]struct{})
-	notFound := 0
 	for _, query := range queries {
 		assets := assetSearchCache[query]
-		if len(assets) == 0 {
-			notFound++
-			continue
-		}
+		matched := false
 		for _, asset := range assets {
 			if asset.ID == "" {
 				continue
 			}
+			matched = true
 			if _, ok := matchedAssetIDsSet[asset.ID]; ok {
 				continue
 			}
 			matchedAssetIDsSet[asset.ID] = struct{}{}
 			matchedAssetIDs = append(matchedAssetIDs, asset.ID)
+		}
+		if !matched {
+			notFound++
 		}
 	}
 	return matchedAssetIDs, notFound, nil
@@ -384,6 +441,7 @@ func addAssetsToAlbum(album Album, assetIDs []string, override bool, notFound in
 		if override {
 			warning("Album skipped: %s (no matching Immich images; not created)", album.AlbumName)
 		} else {
+			runSummary.AlbumsUnchanged++
 			success("Album unchanged: %s", album.AlbumName)
 		}
 		if notFound > 0 {
@@ -416,10 +474,15 @@ func addAssetsToAlbum(album Album, assetIDs []string, override bool, notFound in
 			i++
 		}
 	}
+	runSummary.AssetsAdded += i
 	if override {
 		success("Added %d assets to new album", i)
-	} else {
+	} else if i > 0 {
+		runSummary.AlbumsUpdated++
 		success("Album updated: %s (+%d assets)", album.AlbumName, i)
+	} else {
+		runSummary.AlbumsUnchanged++
+		success("Album unchanged: %s", album.AlbumName)
 	}
 	if notFound > 0 {
 		warning("%d assets not found in Immich", notFound)
@@ -431,10 +494,12 @@ func syncAlbum(album Album, files []TakeoutFile, override bool) {
 		section("🖼️", "Album: "+album.AlbumName)
 	}
 	if len(files) == 0 {
+		runSummary.AlbumsSkipped++
 		warning("Album skipped: %s (no images found)", album.AlbumName)
 		return
 	}
 	if !override && !confirmAlbumAction(fmt.Sprintf("Sync %d Takeout images into this album?", len(files))) {
+		runSummary.AlbumsSkipped++
 		warning("Album skipped: %s", album.AlbumName)
 		return
 	}
@@ -469,22 +534,39 @@ func syncAlbum(album Album, files []TakeoutFile, override bool) {
 }
 
 func createAlbum(albumName string, description string, files []TakeoutFile) {
-	if len(files) == 0 {
+	if len(files) == 0 && minimumMatchedImages > 0 {
+		runSummary.AlbumsSkipped++
 		warning("Album skipped: %s (no images found; not created)", albumName)
 		return
 	}
 	section("🖼️", "Album: "+albumName)
-	info("New album: %s (%d Takeout images)", albumName, len(files))
-	if !confirmAlbumAction(fmt.Sprintf("Create album and sync %d images?", len(files))) {
+	if len(files) == 0 {
+		info("New album: %s (empty Takeout album)", albumName)
+	} else {
+		info("New album: %s (%d Takeout images)", albumName, len(files))
+	}
+	confirmationLabel := fmt.Sprintf("Create album and sync %d images?", len(files))
+	if len(files) == 0 {
+		confirmationLabel = "Create empty album?"
+	}
+	if !confirmAlbumAction(confirmationLabel) {
+		runSummary.AlbumsSkipped++
 		warning("Album skipped: %s (not created)", albumName)
 		return
 	}
-	matchedAssetIDs, notFound, err := findAlbumAssetIDs(files)
-	if err != nil {
-		return
+	var matchedAssetIDs []string
+	notFound := 0
+	if len(files) > 0 {
+		var err error
+		matchedAssetIDs, notFound, err = findAlbumAssetIDs(files)
+		if err != nil {
+			return
+		}
 	}
-	if len(matchedAssetIDs) == 0 {
-		warning("Album skipped: %s (no matching Immich images; not created)", albumName)
+	matchedImages := len(files) - notFound
+	if !albumMeetsCreationThreshold(len(files), matchedImages, minimumMatchedImages) {
+		runSummary.AlbumsSkipped++
+		warning("Album skipped: %s (%d/%d images matched; minimum is %d)", albumName, matchedImages, len(files), minimumMatchedImages)
 		if notFound > 0 {
 			warning("%d assets not found in Immich", notFound)
 		}
@@ -508,6 +590,14 @@ func createAlbum(albumName string, description string, files []TakeoutFile) {
 		return
 	}
 	success("Album created: %s", albumName)
+	runSummary.AlbumsCreated++
+	if len(matchedAssetIDs) == 0 {
+		info("Album created with no matched assets: %s", albumName)
+		if notFound > 0 {
+			warning("%d assets not found in Immich", notFound)
+		}
+		return
+	}
 	addAssetsToAlbum(immichAlbum, matchedAssetIDs, true, notFound)
 }
 
@@ -586,6 +676,13 @@ func main() {
 
 	ok = YesNoPrompt("Do you want to sync your albums?", true, true)
 	if ok {
+		threshold, inputOK := minimumMatchedImagesPrompt()
+		if !inputOK {
+			warning("Input ended; stopping")
+			return
+		}
+		minimumMatchedImages = threshold
+		info("New albums require %d matched images unless all Takeout images match", minimumMatchedImages)
 		data, err := source.ReadAlbums()
 		if err != nil {
 			failure("%v", err)
@@ -601,9 +698,11 @@ func main() {
 			return
 		}
 		assetSearchCache = make(map[assetSearchQuery][]ImmichAsset)
+		runSummary = syncSummary{}
 		for _, albumName := range orderedAlbumNames(data.Albums, data.CreationTimes) {
 			files := data.Albums[albumName]
-			if len(files) == 0 {
+			if len(files) == 0 && minimumMatchedImages > 0 {
+				runSummary.AlbumsSkipped++
 				warning("Album skipped: %s (no images found)", albumName)
 				continue
 			}
@@ -614,6 +713,7 @@ func main() {
 			}
 		}
 		success("Album synchronization complete")
+		printSyncSummary()
 	} else {
 		ok = YesNoPrompt("Do you want to sync assets dates?", true, true)
 		if ok {

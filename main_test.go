@@ -77,6 +77,42 @@ func TestProgressBar(t *testing.T) {
 	}
 }
 
+func TestMinimumMatchedImagesPromptValidatesRange(t *testing.T) {
+	oldStdinReader := stdinReader
+	t.Cleanup(func() { stdinReader = oldStdinReader })
+
+	stdinReader = bufio.NewReader(strings.NewReader("101\n0\n"))
+	got, ok := minimumMatchedImagesPrompt()
+	if !ok || got != 0 {
+		t.Fatalf("minimumMatchedImagesPrompt() = %d, %t; want 0, true", got, ok)
+	}
+}
+
+func TestAlbumMeetsCreationThreshold(t *testing.T) {
+	tests := []struct {
+		name    string
+		total   int
+		matched int
+		limit   int
+		want    bool
+	}{
+		{name: "all images match", total: 5, matched: 5, limit: 100, want: true},
+		{name: "partial match reaches limit", total: 5, matched: 3, limit: 3, want: true},
+		{name: "partial match below limit", total: 5, matched: 2, limit: 3, want: false},
+		{name: "zero allows unmatched images", total: 5, matched: 0, limit: 0, want: true},
+		{name: "zero allows empty album", total: 0, matched: 0, limit: 0, want: true},
+		{name: "nonzero rejects empty album", total: 0, matched: 0, limit: 3, want: false},
+	}
+
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			if got := albumMeetsCreationThreshold(tt.total, tt.matched, tt.limit); got != tt.want {
+				t.Fatalf("albumMeetsCreationThreshold(%d, %d, %d) = %t, want %t", tt.total, tt.matched, tt.limit, got, tt.want)
+			}
+		})
+	}
+}
+
 func TestReadFilesDiscoversAlbumSidecars(t *testing.T) {
 	oldTakeout := takeout
 	oldTakeoutAlbumCreationTimes := takeoutAlbumCreationTimes
@@ -231,9 +267,11 @@ func TestConfirmAlbumActionApprovesRemainingAlbums(t *testing.T) {
 func TestSyncAlbumAddsOnlyMissingAssets(t *testing.T) {
 	oldAPIURL, oldAPIKey, oldHTTPClient := apiURL, apiKey, httpClient
 	oldAssetSearchCache := assetSearchCache
+	oldRunSummary := runSummary
 	t.Cleanup(func() {
 		apiURL, apiKey, httpClient = oldAPIURL, oldAPIKey, oldHTTPClient
 		assetSearchCache = oldAssetSearchCache
+		runSummary = oldRunSummary
 	})
 
 	var addedIDs []string
@@ -292,14 +330,19 @@ func TestSyncAlbumAddsOnlyMissingAssets(t *testing.T) {
 	if got := filenameSearches.Load(); got != 2 {
 		t.Fatalf("filename search requests = %d, want 2 for two unique queries", got)
 	}
+	if runSummary.AlbumsUpdated != 1 || runSummary.AssetsAdded != 1 {
+		t.Fatalf("run summary = %#v, want one updated album and one added asset", runSummary)
+	}
 }
 
 func TestCreateAlbumSkipsEmptyAlbum(t *testing.T) {
 	oldAPIURL, oldAPIKey, oldHTTPClient := apiURL, apiKey, httpClient
 	oldApproveAllAlbums := approveAllAlbums
+	oldRunSummary := runSummary
 	t.Cleanup(func() {
 		apiURL, apiKey, httpClient = oldAPIURL, oldAPIKey, oldHTTPClient
 		approveAllAlbums = oldApproveAllAlbums
+		runSummary = oldRunSummary
 	})
 
 	called := false
@@ -312,6 +355,7 @@ func TestCreateAlbumSkipsEmptyAlbum(t *testing.T) {
 	apiKey = "test-key"
 	httpClient = server.Client()
 	approveAllAlbums = true
+	runSummary = syncSummary{}
 
 	createAlbum("Empty album", "should not be sent", nil)
 	if called {
@@ -323,10 +367,12 @@ func TestCreateAlbumSkipsWhenNoImmichAssetsMatch(t *testing.T) {
 	oldAPIURL, oldAPIKey, oldHTTPClient := apiURL, apiKey, httpClient
 	oldApproveAllAlbums := approveAllAlbums
 	oldAssetSearchCache := assetSearchCache
+	oldRunSummary := runSummary
 	t.Cleanup(func() {
 		apiURL, apiKey, httpClient = oldAPIURL, oldAPIKey, oldHTTPClient
 		approveAllAlbums = oldApproveAllAlbums
 		assetSearchCache = oldAssetSearchCache
+		runSummary = oldRunSummary
 	})
 
 	var albumCreated bool
@@ -347,6 +393,7 @@ func TestCreateAlbumSkipsWhenNoImmichAssetsMatch(t *testing.T) {
 	httpClient = server.Client()
 	approveAllAlbums = true
 	assetSearchCache = nil
+	runSummary = syncSummary{}
 
 	createAlbum("Unmatched album", "should not be created", []TakeoutFile{{
 		Filename:       "missing.jpg",
@@ -359,14 +406,106 @@ func TestCreateAlbumSkipsWhenNoImmichAssetsMatch(t *testing.T) {
 	}
 }
 
-func TestCreateAlbumSendsDescription(t *testing.T) {
+func TestCreateAlbumSkipsPartialMatchBelowThreshold(t *testing.T) {
 	oldAPIURL, oldAPIKey, oldHTTPClient := apiURL, apiKey, httpClient
 	oldApproveAllAlbums := approveAllAlbums
 	oldAssetSearchCache := assetSearchCache
+	oldMinimumMatchedImages := minimumMatchedImages
+	oldRunSummary := runSummary
 	t.Cleanup(func() {
 		apiURL, apiKey, httpClient = oldAPIURL, oldAPIKey, oldHTTPClient
 		approveAllAlbums = oldApproveAllAlbums
 		assetSearchCache = oldAssetSearchCache
+		minimumMatchedImages = oldMinimumMatchedImages
+		runSummary = oldRunSummary
+	})
+
+	server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		if r.Method != http.MethodPost {
+			t.Fatalf("unexpected request: %s %s", r.Method, r.URL.Path)
+		}
+		if r.URL.Path == "/albums" {
+			t.Fatal("createAlbum() created an album below the matched-image threshold")
+		}
+		if r.URL.Path != "/search/metadata" {
+			t.Fatalf("unexpected request path: %s", r.URL.Path)
+		}
+		var payload struct {
+			OriginalFileName string `json:"originalFileName"`
+		}
+		if err := json.NewDecoder(r.Body).Decode(&payload); err != nil {
+			t.Fatalf("decode search request: %v", err)
+		}
+		if payload.OriginalFileName == "match-1.jpg" || payload.OriginalFileName == "match-2.jpg" {
+			_, _ = w.Write([]byte(`{"assets":{"total":1,"count":1,"items":[{"id":"` + payload.OriginalFileName + `","originalFileName":"` + payload.OriginalFileName + `"}]}}`))
+			return
+		}
+		_, _ = w.Write([]byte(`{"assets":{"total":0,"count":0,"items":[]}}`))
+	}))
+	defer server.Close()
+
+	apiURL = server.URL
+	apiKey = "test-key"
+	httpClient = server.Client()
+	approveAllAlbums = true
+	assetSearchCache = nil
+	minimumMatchedImages = 3
+	runSummary = syncSummary{}
+
+	files := make([]TakeoutFile, 0, 5)
+	for _, filename := range []string{"match-1.jpg", "match-2.jpg", "missing-1.jpg", "missing-2.jpg", "missing-3.jpg"} {
+		files = append(files, TakeoutFile{Filename: filename, CreationTime: "1760044090", PhotoTakenTime: "1759504776"})
+	}
+	createAlbum("Partial album", "", files)
+
+}
+
+func TestCreateAlbumAllowsEmptyAlbumWithZeroThreshold(t *testing.T) {
+	oldAPIURL, oldAPIKey, oldHTTPClient := apiURL, apiKey, httpClient
+	oldApproveAllAlbums := approveAllAlbums
+	oldMinimumMatchedImages := minimumMatchedImages
+	oldRunSummary := runSummary
+	t.Cleanup(func() {
+		apiURL, apiKey, httpClient = oldAPIURL, oldAPIKey, oldHTTPClient
+		approveAllAlbums = oldApproveAllAlbums
+		minimumMatchedImages = oldMinimumMatchedImages
+		runSummary = oldRunSummary
+	})
+
+	var albumCreated bool
+	server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		if r.Method != http.MethodPost || r.URL.Path != "/albums" {
+			t.Fatalf("unexpected request: %s %s", r.Method, r.URL.Path)
+		}
+		albumCreated = true
+		_, _ = w.Write([]byte(`{"id":"album-id","albumName":"Empty album"}`))
+	}))
+	defer server.Close()
+
+	apiURL = server.URL
+	apiKey = "test-key"
+	httpClient = server.Client()
+	approveAllAlbums = true
+	minimumMatchedImages = 0
+	runSummary = syncSummary{}
+
+	createAlbum("Empty album", "", nil)
+
+	if !albumCreated {
+		t.Fatal("createAlbum() did not create an empty album with a zero threshold")
+	}
+}
+
+func TestCreateAlbumSendsDescription(t *testing.T) {
+	oldAPIURL, oldAPIKey, oldHTTPClient := apiURL, apiKey, httpClient
+	oldApproveAllAlbums := approveAllAlbums
+	oldAssetSearchCache := assetSearchCache
+	oldRunSummary := runSummary
+	t.Cleanup(func() {
+		apiURL, apiKey, httpClient = oldAPIURL, oldAPIKey, oldHTTPClient
+		approveAllAlbums = oldApproveAllAlbums
+		assetSearchCache = oldAssetSearchCache
+		runSummary = oldRunSummary
 	})
 
 	var description string
@@ -405,6 +544,7 @@ func TestCreateAlbumSendsDescription(t *testing.T) {
 	httpClient = server.Client()
 	approveAllAlbums = true
 	assetSearchCache = nil
+	runSummary = syncSummary{}
 
 	createAlbum("Holiday", "A day in Crete", []TakeoutFile{{
 		Filename:       "photo.jpg",
@@ -414,6 +554,9 @@ func TestCreateAlbumSendsDescription(t *testing.T) {
 
 	if description != "A day in Crete" {
 		t.Fatalf("created album description = %q, want %q", description, "A day in Crete")
+	}
+	if runSummary.AlbumsCreated != 1 || runSummary.AssetsAdded != 1 {
+		t.Fatalf("run summary = %#v, want one created album and one added asset", runSummary)
 	}
 }
 
