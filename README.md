@@ -194,8 +194,10 @@ variables work with `make run` and the built binary.
 
 ## Metadata-only extraction
 
-The image files are unnecessary. On macOS with Homebrew, extract only JSON
-metadata with 7-Zip:
+The image files are unnecessary when only the metadata is needed. Install
+7-Zip and extract only the JSON files as follows.
+
+On macOS with Homebrew:
 
 ```shell
 brew install 7-zip
@@ -205,9 +207,20 @@ mkdir -p /path/to/takeout-json
 export IMMICH_TAKEOUT_PATH="/path/to/takeout-json/Takeout 2026023/Google Photos"
 ```
 
-The same command works for `.zip`; use `7zz l archive.7z` to inspect an archive
-without extracting it. Solid 7z archives may still require reading a large
-part of the archive, but the extracted result remains small.
+On Linux with Arch Linux or Omarchy:
+
+```shell
+sudo pacman -S 7zip
+mkdir -p /path/to/takeout-json
+7z x "/path/to/Google_Takeout_Photos.7z" \
+  -o"/path/to/takeout-json" -r "*.json"
+export IMMICH_TAKEOUT_PATH="/path/to/takeout-json/Takeout 2026023/Google Photos"
+```
+
+The same commands work for `.zip`; use `7zz l archive.7z` on macOS or
+`7z l archive.7z` on Linux to inspect an archive without extracting it. Solid
+7z archives may still require reading a large part of the archive, but the
+extracted result remains small.
 
 ## Troubleshooting
 
