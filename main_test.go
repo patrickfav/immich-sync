@@ -116,24 +116,22 @@ func TestIncludeArchivedPromptCanExclude(t *testing.T) {
 
 func TestAlbumMeetsCreationThreshold(t *testing.T) {
 	tests := []struct {
-		name    string
-		total   int
-		matched int
-		limit   int
-		want    bool
+		name      string
+		itemCount int
+		limit     int
+		want      bool
 	}{
-		{name: "all images match", total: 5, matched: 5, limit: 100, want: true},
-		{name: "partial match reaches limit", total: 5, matched: 3, limit: 3, want: true},
-		{name: "partial match below limit", total: 5, matched: 2, limit: 3, want: false},
-		{name: "zero allows unmatched images", total: 5, matched: 0, limit: 0, want: true},
-		{name: "zero allows empty album", total: 0, matched: 0, limit: 0, want: true},
-		{name: "nonzero rejects empty album", total: 0, matched: 0, limit: 3, want: false},
+		{name: "below limit", itemCount: 2, limit: 3, want: false},
+		{name: "reaches limit", itemCount: 3, limit: 3, want: true},
+		{name: "above limit", itemCount: 5, limit: 3, want: true},
+		{name: "zero allows empty album", itemCount: 0, limit: 0, want: true},
+		{name: "nonzero rejects empty album", itemCount: 0, limit: 3, want: false},
 	}
 
 	for _, tt := range tests {
 		t.Run(tt.name, func(t *testing.T) {
-			if got := albumMeetsCreationThreshold(tt.total, tt.matched, tt.limit); got != tt.want {
-				t.Fatalf("albumMeetsCreationThreshold(%d, %d, %d) = %t, want %t", tt.total, tt.matched, tt.limit, got, tt.want)
+			if got := albumMeetsCreationThreshold(tt.itemCount, tt.limit); got != tt.want {
+				t.Fatalf("albumMeetsCreationThreshold(%d, %d) = %t, want %t", tt.itemCount, tt.limit, got, tt.want)
 			}
 		})
 	}
@@ -474,7 +472,7 @@ func TestCreateAlbumSkipsWhenNoImmichAssetsMatch(t *testing.T) {
 	}
 }
 
-func TestCreateAlbumSkipsPartialMatchBelowThreshold(t *testing.T) {
+func TestCreateAlbumSkipsWhenEffectiveItemCountBelowThreshold(t *testing.T) {
 	oldAPIURL, oldAPIKey, oldHTTPClient := apiURL, apiKey, httpClient
 	oldApproveAllAlbums := approveAllAlbums
 	oldAssetSearchCache := assetSearchCache
@@ -504,8 +502,8 @@ func TestCreateAlbumSkipsPartialMatchBelowThreshold(t *testing.T) {
 		if err := json.NewDecoder(r.Body).Decode(&payload); err != nil {
 			t.Fatalf("decode search request: %v", err)
 		}
-		if payload.OriginalFileName == "match-1.jpg" || payload.OriginalFileName == "match-2.jpg" {
-			_, _ = w.Write([]byte(`{"assets":{"total":1,"count":1,"items":[{"id":"` + payload.OriginalFileName + `","originalFileName":"` + payload.OriginalFileName + `"}]}}`))
+		if strings.HasPrefix(payload.OriginalFileName, "match-") {
+			_, _ = w.Write([]byte(`{"assets":{"total":1,"count":1,"items":[{"id":"same-asset-id","originalFileName":"` + payload.OriginalFileName + `"}]}}`))
 			return
 		}
 		_, _ = w.Write([]byte(`{"assets":{"total":0,"count":0,"items":[]}}`))
@@ -520,8 +518,8 @@ func TestCreateAlbumSkipsPartialMatchBelowThreshold(t *testing.T) {
 	minimumMatchedImages = 3
 	runSummary = syncSummary{}
 
-	files := make([]TakeoutFile, 0, 5)
-	for _, filename := range []string{"match-1.jpg", "match-2.jpg", "missing-1.jpg", "missing-2.jpg", "missing-3.jpg"} {
+	files := make([]TakeoutFile, 0, 3)
+	for _, filename := range []string{"match-1.jpg", "match-2.jpg", "match-3.jpg"} {
 		files = append(files, TakeoutFile{Filename: filename, CreationTime: "1760044090", PhotoTakenTime: "1759504776"})
 	}
 	createAlbum("Partial album", "", files)
@@ -568,11 +566,13 @@ func TestCreateAlbumSendsDescription(t *testing.T) {
 	oldAPIURL, oldAPIKey, oldHTTPClient := apiURL, apiKey, httpClient
 	oldApproveAllAlbums := approveAllAlbums
 	oldAssetSearchCache := assetSearchCache
+	oldMinimumMatchedImages := minimumMatchedImages
 	oldRunSummary := runSummary
 	t.Cleanup(func() {
 		apiURL, apiKey, httpClient = oldAPIURL, oldAPIKey, oldHTTPClient
 		approveAllAlbums = oldApproveAllAlbums
 		assetSearchCache = oldAssetSearchCache
+		minimumMatchedImages = oldMinimumMatchedImages
 		runSummary = oldRunSummary
 	})
 
@@ -612,6 +612,7 @@ func TestCreateAlbumSendsDescription(t *testing.T) {
 	httpClient = server.Client()
 	approveAllAlbums = true
 	assetSearchCache = nil
+	minimumMatchedImages = 1
 	runSummary = syncSummary{}
 
 	createAlbum("Holiday", "A day in Crete", []TakeoutFile{{

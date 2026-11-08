@@ -60,10 +60,10 @@ missing assets, or delete album members.
 - Copy a non-empty Google album description only when creating a new Immich
   album. Skip empty Takeout albums with a warning unless the threshold is 0;
   resolve matching Immich
-  assets before creating a new album. By default, create a partially matched
-  album only when at least three images match; ask for a startup threshold from
-  0 through 100. Create a fully matched album regardless of the threshold, and
-  allow a threshold of 0 to create empty or completely unmatched albums.
+  assets before creating a new album. By default, create an album only when it
+  would contain at least three distinct assets; ask for a startup threshold
+  from 0 through 100. Allow a threshold of 0 to create empty or completely
+  unmatched albums.
 - At startup, ask whether archived Takeout items (`"archived": true`) should
   be included. If excluded, filter them before reporting album image counts,
   matching assets, and applying the minimum matched-image threshold; treat them

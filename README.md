@@ -40,11 +40,9 @@ written to disk by the program. Missing required values are requested
 interactively.
 
 During album synchronization, the program asks for the minimum number of
-matched Immich images required before creating a new album. The default is 3,
-and values from 0 to 100 are accepted. This threshold only applies when some
-Takeout images do not match; an album whose entire Takeout contents match is
-created regardless of the threshold. Setting the threshold to 0 also allows
-empty or completely unmatched albums to be created.
+distinct Immich assets a new album must contain. The default is 3, and values
+from 0 to 100 are accepted. Setting the threshold to 0 also allows empty or
+completely unmatched albums to be created.
 
 At startup, the program also asks whether archived Google Photos items should
 be included. Choosing **No** removes Takeout entries with `"archived": true`
@@ -141,9 +139,10 @@ creation, so rerunning the sync reports the comments as found and skipped but
 adds zero duplicates. For every album with Takeout comments, the sync logs the
 number found, added, and skipped; albums without comments produce no comment
 line.
-By default, empty albums and albums with fewer than three matching Immich
-assets are skipped rather than created when some Takeout images are unmatched.
-The threshold can be changed at startup; a threshold of 0 allows empty albums.
+By default, empty albums and albums that would contain fewer than three
+distinct Immich assets are skipped rather than created. The threshold can be
+changed at startup; a threshold of 0 allows empty or completely unmatched
+albums.
 
 The CLI ends album synchronization with a summary of `created`, `updated`,
 `unchanged`, and `skipped` albums plus the number of newly added assets. It

@@ -245,11 +245,8 @@ func includeArchivedPrompt() bool {
 	return YesNoPrompt("Include archived Google Photos items?", true, true)
 }
 
-func albumMeetsCreationThreshold(totalImages int, matchedImages int, threshold int) bool {
-	if totalImages == 0 {
-		return threshold == 0
-	}
-	return matchedImages == totalImages || matchedImages >= threshold
+func albumMeetsCreationThreshold(itemCount int, threshold int) bool {
+	return itemCount >= threshold
 }
 
 func printSyncSummary() {
@@ -725,10 +722,10 @@ func createAlbum(albumName string, description string, files []TakeoutFile) {
 			matchedAssetIDs = append(matchedAssetIDs, match.Asset.ID)
 		}
 	}
-	matchedImages := len(files) - notFound
-	if !albumMeetsCreationThreshold(len(files), matchedImages, minimumMatchedImages) {
+	itemCount := len(matchedAssetIDs)
+	if !albumMeetsCreationThreshold(itemCount, minimumMatchedImages) {
 		runSummary.AlbumsSkipped++
-		warning("Album skipped: %s (%d/%d images matched; minimum is %d)", albumName, matchedImages, len(files), minimumMatchedImages)
+		warning("Album skipped: %s (%d assets would be added; minimum is %d)", albumName, itemCount, minimumMatchedImages)
 		if notFound > 0 {
 			warning("%d assets not found in Immich", notFound)
 		}
@@ -854,7 +851,7 @@ func main() {
 			return
 		}
 		minimumMatchedImages = threshold
-		info("New albums require %d matched images unless all Takeout images match", minimumMatchedImages)
+		info("New albums require at least %d matched images", minimumMatchedImages)
 		data, err := source.ReadAlbums()
 		if err != nil {
 			failure("%v", err)
