@@ -491,7 +491,7 @@ func TestCreateAlbumSkipsWhenEffectiveItemCountBelowThreshold(t *testing.T) {
 			t.Fatalf("unexpected request: %s %s", r.Method, r.URL.Path)
 		}
 		if r.URL.Path == "/albums" {
-			t.Fatal("createAlbum() created an album below the matched-image threshold")
+			t.Fatal("createAlbum() created an album below the effective-item threshold")
 		}
 		if r.URL.Path != "/search/metadata" {
 			t.Fatalf("unexpected request path: %s", r.URL.Path)
@@ -522,7 +522,7 @@ func TestCreateAlbumSkipsWhenEffectiveItemCountBelowThreshold(t *testing.T) {
 	for _, filename := range []string{"match-1.jpg", "match-2.jpg", "match-3.jpg"} {
 		files = append(files, TakeoutFile{Filename: filename, CreationTime: "1760044090", PhotoTakenTime: "1759504776"})
 	}
-	createAlbum("Partial album", "", files)
+	createAlbum("Duplicate-match album", "", files)
 
 }
 
