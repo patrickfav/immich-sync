@@ -473,9 +473,9 @@ func formatMigratedComment(comment TakeoutComment) string {
 	return author + ": " + text + " [migrated from Google Photos]"
 }
 
-func migrateComments(target activityTarget, comments []TakeoutComment) {
+func migrateComments(target activityTarget, comments []TakeoutComment) (added int, skipped int) {
 	if len(comments) == 0 {
-		return
+		return 0, 0
 	}
 	if activityCommentCache == nil {
 		activityCommentCache = make(map[activityTarget]map[string]struct{})
@@ -503,7 +503,7 @@ func migrateComments(target activityTarget, comments []TakeoutComment) {
 		activities, err := getActivities(target)
 		if err != nil {
 			warning("Could not read existing Immich comments: %v", err)
-			return
+			return 0, len(comments)
 		}
 		existing = make(map[string]struct{}, len(activities))
 		for _, activity := range activities {
@@ -519,25 +519,53 @@ func migrateComments(target activityTarget, comments []TakeoutComment) {
 			continue
 		}
 		if _, ok := existing[comment]; ok {
+			skipped++
 			continue
 		}
 		if err := createActivityComment(target, comment); err != nil {
 			warning("Could not add migrated comment: %v", err)
+			skipped++
 			continue
 		}
 		existing[comment] = struct{}{}
 		runSummary.CommentsAdded++
+		added++
 	}
+	return added, skipped
 }
 
-func migrateAssetComments(albumID string, matches []matchedTakeoutAsset) {
+func migrateAssetComments(albumID string, matches []matchedTakeoutAsset) (added int, skipped int) {
 	for _, match := range matches {
-		migrateComments(activityTarget{AssetID: match.Asset.ID, AlbumID: albumID}, match.File.Comments)
+		assetAdded, assetSkipped := migrateComments(activityTarget{AssetID: match.Asset.ID, AlbumID: albumID}, match.File.Comments)
+		added += assetAdded
+		skipped += assetSkipped
 	}
+	return added, skipped
 }
 
-func migrateAlbumComments(album Album) {
-	migrateComments(activityTarget{AlbumID: album.ID}, takeoutAlbumComments[album.AlbumName])
+func migrateAlbumComments(album Album) (added int, skipped int) {
+	return migrateComments(activityTarget{AlbumID: album.ID}, takeoutAlbumComments[album.AlbumName])
+}
+
+func countAlbumComments(albumName string, files []TakeoutFile) int {
+	count := len(takeoutAlbumComments[albumName])
+	for _, file := range files {
+		count += len(file.Comments)
+	}
+	return count
+}
+
+func logAlbumCommentSummary(albumName string, files []TakeoutFile, added int, skipped int) {
+	found := countAlbumComments(albumName, files)
+	if found == 0 {
+		return
+	}
+	// Comments on unmatched assets, or comments not reached because an album
+	// action was skipped, are still Takeout comments that were not migrated.
+	if remaining := found - added - skipped; remaining > 0 {
+		skipped += remaining
+	}
+	info("Comments for %s: found %d, added %d, skipped %d", albumName, found, added, skipped)
 }
 
 func addAssetsToAlbum(album Album, assetIDs []string, override bool, notFound int) {
@@ -600,17 +628,20 @@ func syncAlbum(album Album, files []TakeoutFile, override bool) {
 	if len(files) == 0 {
 		runSummary.AlbumsSkipped++
 		warning("Album skipped: %s (no images found)", album.AlbumName)
-		migrateAlbumComments(album)
+		added, skipped := migrateAlbumComments(album)
+		logAlbumCommentSummary(album.AlbumName, files, added, skipped)
 		return
 	}
 	if !override && !confirmAlbumAction(fmt.Sprintf("Sync %d Takeout images into this album?", len(files))) {
 		runSummary.AlbumsSkipped++
 		warning("Album skipped: %s", album.AlbumName)
+		logAlbumCommentSummary(album.AlbumName, files, 0, 0)
 		return
 	}
 	immichAssets, err := getAlbumAssets(album.ID)
 	if err != nil {
 		failure("%v", err)
+		logAlbumCommentSummary(album.AlbumName, files, 0, 0)
 		return
 	}
 	existingAssetIDs := make(map[string]struct{}, len(immichAssets))
@@ -621,6 +652,7 @@ func syncAlbum(album Album, files []TakeoutFile, override bool) {
 
 	matchedAssets, notFound, err := findAlbumAssetMatches(files)
 	if err != nil {
+		logAlbumCommentSummary(album.AlbumName, files, 0, 0)
 		return
 	}
 	matchedAssetIDs := make([]string, 0, len(matchedAssets))
@@ -645,14 +677,16 @@ func syncAlbum(album Album, files []TakeoutFile, override bool) {
 		info("Skipped %d assets already present", skipped)
 	}
 	addAssetsToAlbum(album, newAssets, override, notFound)
-	migrateAssetComments(album.ID, matchedAssets)
-	migrateAlbumComments(album)
+	assetCommentsAdded, assetCommentsSkipped := migrateAssetComments(album.ID, matchedAssets)
+	albumCommentsAdded, albumCommentsSkipped := migrateAlbumComments(album)
+	logAlbumCommentSummary(album.AlbumName, files, assetCommentsAdded+albumCommentsAdded, assetCommentsSkipped+albumCommentsSkipped)
 }
 
 func createAlbum(albumName string, description string, files []TakeoutFile) {
 	if len(files) == 0 && minimumMatchedImages > 0 {
 		runSummary.AlbumsSkipped++
 		warning("Album skipped: %s (no images found; not created)", albumName)
+		logAlbumCommentSummary(albumName, files, 0, 0)
 		return
 	}
 	section("🖼️", "Album: "+albumName)
@@ -668,6 +702,7 @@ func createAlbum(albumName string, description string, files []TakeoutFile) {
 	if !confirmAlbumAction(confirmationLabel) {
 		runSummary.AlbumsSkipped++
 		warning("Album skipped: %s (not created)", albumName)
+		logAlbumCommentSummary(albumName, files, 0, 0)
 		return
 	}
 	var matchedAssetIDs []string
@@ -677,6 +712,7 @@ func createAlbum(albumName string, description string, files []TakeoutFile) {
 		var err error
 		matchedAssets, notFound, err = findAlbumAssetMatches(files)
 		if err != nil {
+			logAlbumCommentSummary(albumName, files, 0, 0)
 			return
 		}
 		matchedAssetIDs = make([]string, 0, len(matchedAssets))
@@ -696,6 +732,7 @@ func createAlbum(albumName string, description string, files []TakeoutFile) {
 		if notFound > 0 {
 			warning("%d assets not found in Immich", notFound)
 		}
+		logAlbumCommentSummary(albumName, files, 0, 0)
 		return
 	}
 	body, err := getJSONData("albums", http.MethodPost, struct {
@@ -704,21 +741,27 @@ func createAlbum(albumName string, description string, files []TakeoutFile) {
 	}{AlbumName: albumName, Description: description})
 	if err != nil {
 		failure("%v", err)
+		logAlbumCommentSummary(albumName, files, 0, 0)
 		return
 	}
 	var immichAlbum Album
 	if err := json.Unmarshal(body, &immichAlbum); err != nil {
 		failure("Invalid album response: %v", err)
+		logAlbumCommentSummary(albumName, files, 0, 0)
 		return
 	}
 	if strings.TrimSpace(immichAlbum.ID) == "" {
 		failure("Invalid album response: missing album ID")
+		logAlbumCommentSummary(albumName, files, 0, 0)
 		return
 	}
 	success("Album created: %s", albumName)
 	runSummary.AlbumsCreated++
-	migrateAssetComments(immichAlbum.ID, matchedAssets)
-	migrateAlbumComments(immichAlbum)
+	assetCommentsAdded, assetCommentsSkipped := migrateAssetComments(immichAlbum.ID, matchedAssets)
+	albumCommentsAdded, albumCommentsSkipped := migrateAlbumComments(immichAlbum)
+	commentsAdded := assetCommentsAdded + albumCommentsAdded
+	commentsSkipped := assetCommentsSkipped + albumCommentsSkipped
+	logAlbumCommentSummary(albumName, files, commentsAdded, commentsSkipped)
 	if len(matchedAssetIDs) == 0 {
 		info("Album created with no matched assets: %s", albumName)
 		if notFound > 0 {
@@ -836,6 +879,7 @@ func main() {
 			if len(files) == 0 && minimumMatchedImages > 0 {
 				runSummary.AlbumsSkipped++
 				warning("Album skipped: %s (no images found)", albumName)
+				logAlbumCommentSummary(albumName, files, 0, 0)
 				continue
 			}
 			if album, found := findAlbumByName(albums, albumName); found {

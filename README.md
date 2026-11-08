@@ -92,6 +92,7 @@ go run .
 ────────────────────────────────────────────────────────
 ? Sync 215 Takeout images into this album? (Y/n) y
 ✓ Updated album: added 215 assets
+ℹ Comments for Summer trip 2025: found 3, added 3, skipped 0
 
 ✓ Album synchronization complete
 
@@ -136,8 +137,10 @@ before matching and threshold checks.
 Text comments are migrated as the current Immich API-key user because Immich
 does not provide an anonymous or Google-user identity for this import. Existing
 matching comments are detected within their album and asset scope before
-creation, so rerunning the sync reports the comments as found but adds zero
-duplicates.
+creation, so rerunning the sync reports the comments as found and skipped but
+adds zero duplicates. For every album with Takeout comments, the sync logs the
+number found, added, and skipped; albums without comments produce no comment
+line.
 By default, empty albums and albums with fewer than three matching Immich
 assets are skipped rather than created when some Takeout images are unmatched.
 The threshold can be changed at startup; a threshold of 0 allows empty albums.

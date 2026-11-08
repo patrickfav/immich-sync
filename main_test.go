@@ -4,6 +4,7 @@ import (
 	"bufio"
 	"encoding/json"
 	"fmt"
+	"io"
 	"net/http"
 	"net/http/httptest"
 	"os"
@@ -689,6 +690,33 @@ func TestMigrateCommentsUsesCurrentUserAndIsIdempotent(t *testing.T) {
 	})
 	if len(created) != 1 || runSummary.CommentsAdded != 1 {
 		t.Fatalf("rerun created activities/comments added = %d/%d, want 1/1", len(created), runSummary.CommentsAdded)
+	}
+}
+
+func TestLogAlbumCommentSummaryOnlyLogsAlbumsWithComments(t *testing.T) {
+	oldTakeoutAlbumComments := takeoutAlbumComments
+	t.Cleanup(func() { takeoutAlbumComments = oldTakeoutAlbumComments })
+	takeoutAlbumComments = map[string][]TakeoutComment{
+		"Holiday": {{Text: "Nice album"}},
+	}
+
+	oldStdout := os.Stdout
+	reader, writer, err := os.Pipe()
+	if err != nil {
+		t.Fatalf("create stdout pipe: %v", err)
+	}
+	os.Stdout = writer
+	logAlbumCommentSummary("Empty", nil, 0, 0)
+	logAlbumCommentSummary("Holiday", []TakeoutFile{{Comments: []TakeoutComment{{Text: "Nice photo"}}}}, 1, 1)
+	_ = writer.Close()
+	os.Stdout = oldStdout
+
+	output, err := io.ReadAll(reader)
+	if err != nil {
+		t.Fatalf("read captured output: %v", err)
+	}
+	if got, want := string(output), "ℹ Comments for Holiday: found 2, added 1, skipped 1\n"; got != want {
+		t.Fatalf("comment summary output = %q, want %q", got, want)
 	}
 }
 
