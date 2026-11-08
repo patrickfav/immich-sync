@@ -13,10 +13,11 @@ import (
 )
 
 type Asset struct {
-	Title       *string `json:"title"`
-	Description string  `json:"description"`
-	Archived    bool    `json:"archived"`
-	Date        struct {
+	Title               *string              `json:"title"`
+	Description         string               `json:"description"`
+	Archived            bool                 `json:"archived"`
+	SharedAlbumComments []SharedAlbumComment `json:"sharedAlbumComments"`
+	Date                struct {
 		Timestamp string `json:"timestamp"`
 	} `json:"date"`
 	CreationTime struct {
@@ -27,11 +28,22 @@ type Asset struct {
 	} `json:"photoTakenTime"`
 }
 
+type SharedAlbumComment struct {
+	Text             string `json:"text"`
+	ContentOwnerName string `json:"contentOwnerName"`
+}
+
+type TakeoutComment struct {
+	Text   string
+	Author string
+}
+
 type TakeoutFile struct {
 	Filename       string
 	CreationTime   string
 	PhotoTakenTime string
 	Archived       bool
+	Comments       []TakeoutComment
 }
 
 var takeout map[string][]TakeoutFile
@@ -39,6 +51,8 @@ var takeout map[string][]TakeoutFile
 var takeoutAlbumCreationTimes map[string]int64
 
 var takeoutAlbumDescriptions map[string]string
+
+var takeoutAlbumComments map[string][]TakeoutComment
 
 var takeoutFiles []TakeoutFile
 
@@ -62,8 +76,10 @@ func takeoutFilenameFromMetadata(name string) (string, bool) {
 	// Google may disambiguate duplicate sidecars as .suppl(1).json.
 	if strings.HasSuffix(name, ".json") {
 		base := strings.TrimSuffix(name, ".json")
-		if suffixStart := strings.LastIndex(base, ".suppl("); suffixStart >= 0 && strings.HasSuffix(base, ")") {
-			return base[:suffixStart], true
+		for _, marker := range []string{".supplemental-metadata(", ".suppl("} {
+			if suffixStart := strings.LastIndex(base, marker); suffixStart >= 0 && strings.HasSuffix(base, ")") {
+				return base[:suffixStart], true
+			}
 		}
 	}
 
@@ -100,6 +116,7 @@ func readFiles(readAll bool) error {
 	takeout = make(map[string][]TakeoutFile)
 	takeoutAlbumCreationTimes = make(map[string]int64)
 	takeoutAlbumDescriptions = make(map[string]string)
+	takeoutAlbumComments = make(map[string][]TakeoutComment)
 	takeoutFiles = nil
 	section("📦", "Google Takeout")
 	info("Reading album metadata...")
@@ -127,6 +144,7 @@ func readFiles(readAll bool) error {
 		if asset.Title != nil && *asset.Title != "" {
 			albumsTotal++
 			takeoutAlbumDescriptions[*asset.Title] = strings.TrimSpace(asset.Description)
+			takeoutAlbumComments[*asset.Title] = takeoutComments(asset.SharedAlbumComments)
 			if timestamp, err := strconv.ParseInt(asset.Date.Timestamp, 10, 64); err == nil {
 				takeoutAlbumCreationTimes[*asset.Title] = timestamp
 			}
@@ -173,7 +191,7 @@ func readAlbum(albumPath string, albumTitle string) error {
 			continue
 		}
 		if fileName != "" {
-			takeout[albumTitle] = append(takeout[albumTitle], TakeoutFile{Filename: fileName, CreationTime: asset.CreationTime.Timestamp, PhotoTakenTime: asset.PhotoTakenTime.Timestamp, Archived: asset.Archived})
+			takeout[albumTitle] = append(takeout[albumTitle], TakeoutFile{Filename: fileName, CreationTime: asset.CreationTime.Timestamp, PhotoTakenTime: asset.PhotoTakenTime.Timestamp, Archived: asset.Archived, Comments: takeoutComments(asset.SharedAlbumComments)})
 		}
 	}
 	imageCount := len(takeout[albumTitle])
@@ -206,11 +224,23 @@ func readAllDir(path string) error {
 				continue
 			}
 			if asset.PhotoTakenTime.Timestamp != "" {
-				takeoutFiles = append(takeoutFiles, TakeoutFile{Filename: fileName, CreationTime: asset.CreationTime.Timestamp, PhotoTakenTime: asset.PhotoTakenTime.Timestamp, Archived: asset.Archived})
+				takeoutFiles = append(takeoutFiles, TakeoutFile{Filename: fileName, CreationTime: asset.CreationTime.Timestamp, PhotoTakenTime: asset.PhotoTakenTime.Timestamp, Archived: asset.Archived, Comments: takeoutComments(asset.SharedAlbumComments)})
 			}
 		}
 	}
 	return nil
+}
+
+func takeoutComments(comments []SharedAlbumComment) []TakeoutComment {
+	result := make([]TakeoutComment, 0, len(comments))
+	for _, comment := range comments {
+		text := strings.TrimSpace(comment.Text)
+		if text == "" {
+			continue
+		}
+		result = append(result, TakeoutComment{Text: text, Author: strings.TrimSpace(comment.ContentOwnerName)})
+	}
+	return result
 }
 
 func takeoutPhotoTime(file TakeoutFile) (time.Time, error) {
@@ -281,6 +311,7 @@ type sourceData struct {
 	Albums        map[string][]TakeoutFile
 	CreationTimes map[string]int64
 	Descriptions  map[string]string
+	Comments      map[string][]TakeoutComment
 }
 
 type localTakeoutSource struct{}
@@ -293,6 +324,7 @@ func (localTakeoutSource) ReadAlbums() (sourceData, error) {
 		Albums:        takeout,
 		CreationTimes: takeoutAlbumCreationTimes,
 		Descriptions:  takeoutAlbumDescriptions,
+		Comments:      takeoutAlbumComments,
 	}, nil
 }
 

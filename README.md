@@ -4,6 +4,12 @@
 library. It reads Google Takeout metadata, finds the matching assets already in
 Immich, and adds those assets to albums.
 
+It also migrates text entries from Google Photos `sharedAlbumComments`. Photo
+comments are added to the matching Immich asset and album comments to the
+matching Immich album. Immich attributes API-created comments to the API-key
+owner, so the original Google author is preserved in the text as
+`Name: comment [migrated from Google Photos]`. Likes without text are ignored.
+
 > **No image upload, import, or deletion.** Existing Immich album members are
 > preserved. For a complete Google Photos import, use a tool such as
 > [immich-go](https://github.com/simulot/immich-go).
@@ -96,6 +102,8 @@ go run .
   [=]  Albums unchanged     │      7
   [!]  Albums skipped       │      0
   [+]  New assets added     │    215
+  [?]  Comments found       │      3
+  [+]  Comments added       │      3
 ```
 
 When output is redirected, or `NO_COLOR=1` / `TERM=dumb` is set, colors and
@@ -125,6 +133,11 @@ timestamp, then lexicographically for ties or undated albums. A non-empty
 Google album description is copied only when a new Immich album is created.
 Archived items are included by default; the startup choice can exclude them
 before matching and threshold checks.
+Text comments are migrated as the current Immich API-key user because Immich
+does not provide an anonymous or Google-user identity for this import. Existing
+matching comments are detected within their album and asset scope before
+creation, so rerunning the sync reports the comments as found but adds zero
+duplicates.
 By default, empty albums and albums with fewer than three matching Immich
 assets are skipped rather than created when some Takeout images are unmatched.
 The threshold can be changed at startup; a threshold of 0 allows empty albums.

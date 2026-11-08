@@ -46,6 +46,11 @@ func TestTakeoutFilenameFromMetadata(t *testing.T) {
 			wantOkay: true,
 		},
 		{
+			name:     "SNY00032_24MP.jpg.supplemental-metadata(1).json",
+			want:     "SNY00032_24MP.jpg",
+			wantOkay: true,
+		},
+		{
 			name:     "metadata.json",
 			wantOkay: false,
 		},
@@ -619,6 +624,71 @@ func TestCreateAlbumSendsDescription(t *testing.T) {
 	}
 	if runSummary.AlbumsCreated != 1 || runSummary.AssetsAdded != 1 {
 		t.Fatalf("run summary = %#v, want one created album and one added asset", runSummary)
+	}
+}
+
+func TestMigrateCommentsUsesCurrentUserAndIsIdempotent(t *testing.T) {
+	oldAPIURL, oldAPIKey, oldHTTPClient := apiURL, apiKey, httpClient
+	oldActivityCommentCache := activityCommentCache
+	oldActivityCommentFoundCache := activityCommentFoundCache
+	oldRunSummary := runSummary
+	t.Cleanup(func() {
+		apiURL, apiKey, httpClient = oldAPIURL, oldAPIKey, oldHTTPClient
+		activityCommentCache = oldActivityCommentCache
+		activityCommentFoundCache = oldActivityCommentFoundCache
+		runSummary = oldRunSummary
+	})
+
+	var created []map[string]string
+	server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		w.Header().Set("Content-Type", "application/json")
+		switch {
+		case r.Method == http.MethodGet && r.URL.Path == "/activities":
+			_, _ = w.Write([]byte(`[{"type":"comment","comment":"Jamie Example: Already there [migrated from Google Photos]"}]`))
+		case r.Method == http.MethodPost && r.URL.Path == "/activities":
+			var payload map[string]string
+			if err := json.NewDecoder(r.Body).Decode(&payload); err != nil {
+				t.Fatalf("decode create activity request: %v", err)
+			}
+			created = append(created, payload)
+			_, _ = w.Write([]byte(`{"id":"activity-id"}`))
+		default:
+			t.Fatalf("unexpected request: %s %s", r.Method, r.URL.Path)
+		}
+	}))
+	defer server.Close()
+
+	apiURL = server.URL
+	apiKey = "test-key"
+	httpClient = server.Client()
+	activityCommentCache = nil
+	activityCommentFoundCache = nil
+	runSummary = syncSummary{}
+
+	migrateComments(activityTarget{AssetID: "asset-id", AlbumID: "album-id"}, []TakeoutComment{
+		{Author: "Jamie Example", Text: "Already there"},
+		{Author: "Alex Example", Text: "A useful comment"},
+	})
+
+	if len(created) != 1 {
+		t.Fatalf("created activities = %d, want 1", len(created))
+	}
+	if created[0]["assetId"] != "asset-id" || created[0]["albumId"] != "album-id" || created[0]["type"] != "comment" {
+		t.Fatalf("created activity target/type = %#v", created[0])
+	}
+	if created[0]["comment"] != "Alex Example: A useful comment [migrated from Google Photos]" {
+		t.Fatalf("created comment = %q", created[0]["comment"])
+	}
+	if runSummary.CommentsFound != 2 || runSummary.CommentsAdded != 1 {
+		t.Fatalf("comments found/added = %d/%d, want 2/1", runSummary.CommentsFound, runSummary.CommentsAdded)
+	}
+
+	migrateComments(activityTarget{AssetID: "asset-id", AlbumID: "album-id"}, []TakeoutComment{
+		{Author: "Jamie Example", Text: "Already there"},
+		{Author: "Alex Example", Text: "A useful comment"},
+	})
+	if len(created) != 1 || runSummary.CommentsAdded != 1 {
+		t.Fatalf("rerun created activities/comments added = %d/%d, want 1/1", len(created), runSummary.CommentsAdded)
 	}
 }
 

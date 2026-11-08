@@ -29,6 +29,8 @@ type syncSummary struct {
 	AlbumsUnchanged int
 	AlbumsSkipped   int
 	AssetsAdded     int
+	CommentsFound   int
+	CommentsAdded   int
 }
 
 const (
@@ -263,6 +265,8 @@ func printSyncSummary() {
 		{icon: "[=]", label: "Albums unchanged", value: runSummary.AlbumsUnchanged, color: ansiDim},
 		{icon: "[!]", label: "Albums skipped", value: runSummary.AlbumsSkipped, color: ansiYellow},
 		{icon: "[+]", label: "New assets added", value: runSummary.AssetsAdded, color: ansiGreen},
+		{icon: "[?]", label: "Comments found", value: runSummary.CommentsFound, color: ansiCyan},
+		{icon: "[+]", label: "Comments added", value: runSummary.CommentsAdded, color: ansiGreen},
 	}
 	for _, row := range rows {
 		value := colorize(row.color, fmt.Sprintf("%6d", row.value))
@@ -360,11 +364,17 @@ func syncFilesByDate(date string) error {
 	return nil
 }
 
-func findAlbumAssetIDs(files []TakeoutFile) ([]string, int, error) {
+type matchedTakeoutAsset struct {
+	File  TakeoutFile
+	Asset ImmichAsset
+}
+
+func findAlbumAssetMatches(files []TakeoutFile) ([]matchedTakeoutAsset, int, error) {
 	if assetSearchCache == nil {
 		assetSearchCache = make(map[assetSearchQuery][]ImmichAsset)
 	}
 	queries := make([]assetSearchQuery, 0, len(files))
+	queryFiles := make([]TakeoutFile, 0, len(files))
 	uniqueQueries := make([]assetSearchQuery, 0, len(files))
 	seenQueries := make(map[assetSearchQuery]struct{}, len(files))
 	notFound := 0
@@ -387,6 +397,7 @@ func findAlbumAssetIDs(files []TakeoutFile) ([]string, int, error) {
 		createdBefore := tm2.Add(24 * time.Hour).UTC().Format(time.RFC3339)
 		query := assetSearchQuery{Filename: file.Filename, TakenAfter: createdAfter, TakenBefore: createdBefore}
 		queries = append(queries, query)
+		queryFiles = append(queryFiles, file)
 		if _, ok := seenQueries[query]; !ok {
 			seenQueries[query] = struct{}{}
 			uniqueQueries = append(uniqueQueries, query)
@@ -418,9 +429,8 @@ func findAlbumAssetIDs(files []TakeoutFile) ([]string, int, error) {
 		info("Reused %d cached asset searches", len(uniqueQueries)-len(uncachedQueries))
 	}
 
-	matchedAssetIDs := make([]string, 0)
-	matchedAssetIDsSet := make(map[string]struct{})
-	for _, query := range queries {
+	matches := make([]matchedTakeoutAsset, 0)
+	for fileIndex, query := range queries {
 		assets := assetSearchCache[query]
 		matched := false
 		for _, asset := range assets {
@@ -428,17 +438,106 @@ func findAlbumAssetIDs(files []TakeoutFile) ([]string, int, error) {
 				continue
 			}
 			matched = true
-			if _, ok := matchedAssetIDsSet[asset.ID]; ok {
-				continue
-			}
-			matchedAssetIDsSet[asset.ID] = struct{}{}
-			matchedAssetIDs = append(matchedAssetIDs, asset.ID)
+			matches = append(matches, matchedTakeoutAsset{File: queryFiles[fileIndex], Asset: asset})
 		}
 		if !matched {
 			notFound++
 		}
 	}
-	return matchedAssetIDs, notFound, nil
+	return matches, notFound, nil
+}
+
+func findAlbumAssetIDs(files []TakeoutFile) ([]string, int, error) {
+	matches, notFound, err := findAlbumAssetMatches(files)
+	if err != nil {
+		return nil, 0, err
+	}
+	assetIDs := make([]string, 0, len(matches))
+	seen := make(map[string]struct{})
+	for _, match := range matches {
+		if _, ok := seen[match.Asset.ID]; ok {
+			continue
+		}
+		seen[match.Asset.ID] = struct{}{}
+		assetIDs = append(assetIDs, match.Asset.ID)
+	}
+	return assetIDs, notFound, nil
+}
+
+func formatMigratedComment(comment TakeoutComment) string {
+	text := strings.TrimSpace(comment.Text)
+	author := strings.TrimSpace(comment.Author)
+	if author == "" {
+		return text + " [migrated from Google Photos]"
+	}
+	return author + ": " + text + " [migrated from Google Photos]"
+}
+
+func migrateComments(target activityTarget, comments []TakeoutComment) {
+	if len(comments) == 0 {
+		return
+	}
+	if activityCommentCache == nil {
+		activityCommentCache = make(map[activityTarget]map[string]struct{})
+	}
+	if activityCommentFoundCache == nil {
+		activityCommentFoundCache = make(map[activityTarget]map[string]struct{})
+	}
+	found := activityCommentFoundCache[target]
+	if found == nil {
+		found = make(map[string]struct{})
+		activityCommentFoundCache[target] = found
+	}
+	for _, sourceComment := range comments {
+		comment := formatMigratedComment(sourceComment)
+		if strings.TrimSpace(comment) == "[migrated from Google Photos]" {
+			continue
+		}
+		if _, ok := found[comment]; !ok {
+			found[comment] = struct{}{}
+			runSummary.CommentsFound++
+		}
+	}
+	existing, cached := activityCommentCache[target]
+	if !cached {
+		activities, err := getActivities(target)
+		if err != nil {
+			warning("Could not read existing Immich comments: %v", err)
+			return
+		}
+		existing = make(map[string]struct{}, len(activities))
+		for _, activity := range activities {
+			if strings.EqualFold(activity.Type, "comment") && strings.TrimSpace(activity.Comment) != "" {
+				existing[activity.Comment] = struct{}{}
+			}
+		}
+		activityCommentCache[target] = existing
+	}
+	for _, sourceComment := range comments {
+		comment := formatMigratedComment(sourceComment)
+		if strings.TrimSpace(comment) == "[migrated from Google Photos]" {
+			continue
+		}
+		if _, ok := existing[comment]; ok {
+			continue
+		}
+		if err := createActivityComment(target, comment); err != nil {
+			warning("Could not add migrated comment: %v", err)
+			continue
+		}
+		existing[comment] = struct{}{}
+		runSummary.CommentsAdded++
+	}
+}
+
+func migrateAssetComments(albumID string, matches []matchedTakeoutAsset) {
+	for _, match := range matches {
+		migrateComments(activityTarget{AssetID: match.Asset.ID, AlbumID: albumID}, match.File.Comments)
+	}
+}
+
+func migrateAlbumComments(album Album) {
+	migrateComments(activityTarget{AlbumID: album.ID}, takeoutAlbumComments[album.AlbumName])
 }
 
 func addAssetsToAlbum(album Album, assetIDs []string, override bool, notFound int) {
@@ -501,6 +600,7 @@ func syncAlbum(album Album, files []TakeoutFile, override bool) {
 	if len(files) == 0 {
 		runSummary.AlbumsSkipped++
 		warning("Album skipped: %s (no images found)", album.AlbumName)
+		migrateAlbumComments(album)
 		return
 	}
 	if !override && !confirmAlbumAction(fmt.Sprintf("Sync %d Takeout images into this album?", len(files))) {
@@ -519,9 +619,18 @@ func syncAlbum(album Album, files []TakeoutFile, override bool) {
 	}
 	info("Already in album: %d assets", len(existingAssetIDs))
 
-	matchedAssetIDs, notFound, err := findAlbumAssetIDs(files)
+	matchedAssets, notFound, err := findAlbumAssetMatches(files)
 	if err != nil {
 		return
+	}
+	matchedAssetIDs := make([]string, 0, len(matchedAssets))
+	matchedAssetIDsSet := make(map[string]struct{})
+	for _, match := range matchedAssets {
+		if _, ok := matchedAssetIDsSet[match.Asset.ID]; ok {
+			continue
+		}
+		matchedAssetIDsSet[match.Asset.ID] = struct{}{}
+		matchedAssetIDs = append(matchedAssetIDs, match.Asset.ID)
 	}
 	newAssets := make([]string, 0, len(matchedAssetIDs))
 	skipped := 0
@@ -536,6 +645,8 @@ func syncAlbum(album Album, files []TakeoutFile, override bool) {
 		info("Skipped %d assets already present", skipped)
 	}
 	addAssetsToAlbum(album, newAssets, override, notFound)
+	migrateAssetComments(album.ID, matchedAssets)
+	migrateAlbumComments(album)
 }
 
 func createAlbum(albumName string, description string, files []TakeoutFile) {
@@ -560,12 +671,22 @@ func createAlbum(albumName string, description string, files []TakeoutFile) {
 		return
 	}
 	var matchedAssetIDs []string
+	var matchedAssets []matchedTakeoutAsset
 	notFound := 0
 	if len(files) > 0 {
 		var err error
-		matchedAssetIDs, notFound, err = findAlbumAssetIDs(files)
+		matchedAssets, notFound, err = findAlbumAssetMatches(files)
 		if err != nil {
 			return
+		}
+		matchedAssetIDs = make([]string, 0, len(matchedAssets))
+		seenAssetIDs := make(map[string]struct{})
+		for _, match := range matchedAssets {
+			if _, ok := seenAssetIDs[match.Asset.ID]; ok {
+				continue
+			}
+			seenAssetIDs[match.Asset.ID] = struct{}{}
+			matchedAssetIDs = append(matchedAssetIDs, match.Asset.ID)
 		}
 	}
 	matchedImages := len(files) - notFound
@@ -596,6 +717,8 @@ func createAlbum(albumName string, description string, files []TakeoutFile) {
 	}
 	success("Album created: %s", albumName)
 	runSummary.AlbumsCreated++
+	migrateAssetComments(immichAlbum.ID, matchedAssets)
+	migrateAlbumComments(immichAlbum)
 	if len(matchedAssetIDs) == 0 {
 		info("Album created with no matched assets: %s", albumName)
 		if notFound > 0 {
@@ -698,12 +821,15 @@ func main() {
 			warning("No files found")
 			return
 		}
+		takeoutAlbumComments = data.Comments
 		albums, err := getAlbums()
 		if err != nil {
 			failure("%v", err)
 			return
 		}
 		assetSearchCache = make(map[assetSearchQuery][]ImmichAsset)
+		activityCommentCache = make(map[activityTarget]map[string]struct{})
+		activityCommentFoundCache = make(map[activityTarget]map[string]struct{})
 		runSummary = syncSummary{}
 		for _, albumName := range orderedAlbumNames(data.Albums, data.CreationTimes) {
 			files := data.Albums[albumName]

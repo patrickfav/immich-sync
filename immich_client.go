@@ -39,6 +39,17 @@ type Album struct {
 	ID        string `json:"id"`
 }
 
+type ImmichActivity struct {
+	ID      string `json:"id"`
+	Type    string `json:"type"`
+	Comment string `json:"comment"`
+}
+
+type activityTarget struct {
+	AssetID string
+	AlbumID string
+}
+
 type assetSearchQuery struct {
 	Filename    string
 	TakenAfter  string
@@ -63,10 +74,12 @@ const (
 )
 
 var (
-	apiURL           string
-	apiKey           string
-	httpClient       = &http.Client{Timeout: 30 * time.Second}
-	assetSearchCache map[assetSearchQuery][]ImmichAsset
+	apiURL                    string
+	apiKey                    string
+	httpClient                = &http.Client{Timeout: 30 * time.Second}
+	assetSearchCache          map[assetSearchQuery][]ImmichAsset
+	activityCommentCache      map[activityTarget]map[string]struct{}
+	activityCommentFoundCache map[activityTarget]map[string]struct{}
 )
 
 type rateLimitState struct {
@@ -233,6 +246,42 @@ func findAlbumByName(albums []Album, albumName string) (Album, bool) {
 		}
 	}
 	return Album{}, false
+}
+
+func getActivities(target activityTarget) ([]ImmichActivity, error) {
+	query := url.Values{}
+	if target.AssetID != "" {
+		query.Set("assetId", target.AssetID)
+	}
+	if target.AlbumID != "" {
+		query.Set("albumId", target.AlbumID)
+	}
+	body, err := getData("activities?"+query.Encode(), http.MethodGet, "")
+	if err != nil {
+		return nil, err
+	}
+	var activities []ImmichActivity
+	if err := json.Unmarshal(body, &activities); err == nil {
+		return activities, nil
+	}
+	var response struct {
+		Activities []ImmichActivity `json:"activities"`
+	}
+	if err := json.Unmarshal(body, &response); err != nil {
+		return nil, fmt.Errorf("invalid Immich activities response: %w", err)
+	}
+	return response.Activities, nil
+}
+
+func createActivityComment(target activityTarget, comment string) error {
+	payload := struct {
+		AssetID string `json:"assetId,omitempty"`
+		AlbumID string `json:"albumId"`
+		Comment string `json:"comment"`
+		Type    string `json:"type"`
+	}{AssetID: target.AssetID, AlbumID: target.AlbumID, Comment: comment, Type: "comment"}
+	_, err := getJSONData("activities", http.MethodPost, payload)
+	return err
 }
 
 func searchMetadata(payload any) (ImmichAssetAssets, error) {
