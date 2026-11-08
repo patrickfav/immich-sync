@@ -13,12 +13,12 @@ import (
 )
 
 var (
-	suppressConfirmation    = false
-	approveAllAlbums        = false
-	includeArchived         = true
-	minimumMatchedImages    = defaultMinimumMatchedImages
-	runSummary              syncSummary
-	stdinReader             = bufio.NewReader(os.Stdin)
+	suppressConfirmation = false
+	approveAllAlbums     = false
+	includeArchived      = true
+	minimumMatchedImages = defaultMinimumMatchedImages
+	runSummary           syncSummary
+	stdinReader          = bufio.NewReader(os.Stdin)
 )
 
 const defaultMinimumMatchedImages = 3
