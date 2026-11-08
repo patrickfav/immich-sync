@@ -326,10 +326,12 @@ func TestConfirmAlbumActionApprovesRemainingAlbums(t *testing.T) {
 func TestSyncAlbumAddsOnlyMissingAssets(t *testing.T) {
 	oldAPIURL, oldAPIKey, oldHTTPClient := apiURL, apiKey, httpClient
 	oldAssetSearchCache := assetSearchCache
+	oldApproveAllAlbums := approveAllAlbums
 	oldRunSummary := runSummary
 	t.Cleanup(func() {
 		apiURL, apiKey, httpClient = oldAPIURL, oldAPIKey, oldHTTPClient
 		assetSearchCache = oldAssetSearchCache
+		approveAllAlbums = oldApproveAllAlbums
 		runSummary = oldRunSummary
 	})
 
@@ -376,12 +378,13 @@ func TestSyncAlbumAddsOnlyMissingAssets(t *testing.T) {
 	apiURL = server.URL + "/"
 	apiKey = "test-key"
 	httpClient = server.Client()
+	approveAllAlbums = true
 
 	syncAlbum(Album{ID: "album-id", AlbumName: "Holiday"}, []TakeoutFile{
 		{Filename: "already.jpg", CreationTime: "1700000000", PhotoTakenTime: "1700000000"},
 		{Filename: "new.jpg", CreationTime: "1700000000", PhotoTakenTime: "1700000000"},
 		{Filename: "new.jpg", CreationTime: "1700000000", PhotoTakenTime: "1700000000"},
-	}, true)
+	}, false)
 
 	if len(addedIDs) != 1 || addedIDs[0] != "new-id" {
 		t.Fatalf("added asset IDs = %v, want [new-id]", addedIDs)
