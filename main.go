@@ -7,6 +7,7 @@ import (
 	"fmt"
 	"net/http"
 	"os"
+	"path/filepath"
 	"strconv"
 	"strings"
 	"time"
@@ -366,38 +367,52 @@ type matchedTakeoutAsset struct {
 	Asset ImmichAsset
 }
 
+func takeoutFilenameCandidates(filename string) []string {
+	extension := filepath.Ext(filename)
+	if extension == "" {
+		return []string{filename}
+	}
+
+	switch strings.ToLower(extension) {
+	case ".tif", ".tiff":
+		base := strings.TrimSuffix(filename, extension)
+		return []string{filename, base + ".jpg", base + ".jpeg"}
+	default:
+		return []string{filename}
+	}
+}
+
 func findAlbumAssetMatches(files []TakeoutFile) ([]matchedTakeoutAsset, int, error) {
 	if assetSearchCache == nil {
 		assetSearchCache = make(map[assetSearchQuery][]ImmichAsset)
 	}
 	queries := make([]assetSearchQuery, 0, len(files))
 	queryFiles := make([]TakeoutFile, 0, len(files))
+	queryFileIndices := make([]int, 0, len(files))
 	uniqueQueries := make([]assetSearchQuery, 0, len(files))
 	seenQueries := make(map[assetSearchQuery]struct{}, len(files))
+	validFiles := make([]bool, len(files))
 	notFound := 0
-	for _, file := range files {
-		createdAfterTimestamp, err := parseTakeoutTimestamp(file.PhotoTakenTime, file.CreationTime)
+	for fileIndex, file := range files {
+		photoTimestamp, err := parseTakeoutTimestamp(file.PhotoTakenTime, "")
 		if err != nil {
 			warning("Skipping %s: invalid photo timestamp: %v", file.Filename, err)
 			notFound++
 			continue
 		}
-		createdBeforeTimestamp, err := parseTakeoutTimestamp(file.CreationTime, file.PhotoTakenTime)
-		if err != nil {
-			warning("Skipping %s: invalid creation timestamp: %v", file.Filename, err)
-			notFound++
-			continue
-		}
-		tm1 := time.Unix(createdAfterTimestamp, 0)
-		tm2 := time.Unix(createdBeforeTimestamp, 0)
-		createdAfter := tm1.Add(-24 * time.Hour).UTC().Format(time.RFC3339)
-		createdBefore := tm2.Add(24 * time.Hour).UTC().Format(time.RFC3339)
-		query := assetSearchQuery{Filename: file.Filename, TakenAfter: createdAfter, TakenBefore: createdBefore}
-		queries = append(queries, query)
-		queryFiles = append(queryFiles, file)
-		if _, ok := seenQueries[query]; !ok {
-			seenQueries[query] = struct{}{}
-			uniqueQueries = append(uniqueQueries, query)
+		photoTime := time.Unix(photoTimestamp, 0)
+		takenAfter := photoTime.Add(-24 * time.Hour).UTC().Format(time.RFC3339)
+		takenBefore := photoTime.Add(24 * time.Hour).UTC().Format(time.RFC3339)
+		validFiles[fileIndex] = true
+		for _, filename := range takeoutFilenameCandidates(file.Filename) {
+			query := assetSearchQuery{Filename: filename, TakenAfter: takenAfter, TakenBefore: takenBefore}
+			queries = append(queries, query)
+			queryFiles = append(queryFiles, file)
+			queryFileIndices = append(queryFileIndices, fileIndex)
+			if _, ok := seenQueries[query]; !ok {
+				seenQueries[query] = struct{}{}
+				uniqueQueries = append(uniqueQueries, query)
+			}
 		}
 	}
 
@@ -427,17 +442,19 @@ func findAlbumAssetMatches(files []TakeoutFile) ([]matchedTakeoutAsset, int, err
 	}
 
 	matches := make([]matchedTakeoutAsset, 0)
+	matchedFiles := make([]bool, len(files))
 	for fileIndex, query := range queries {
 		assets := assetSearchCache[query]
-		matched := false
 		for _, asset := range assets {
 			if asset.ID == "" {
 				continue
 			}
-			matched = true
 			matches = append(matches, matchedTakeoutAsset{File: queryFiles[fileIndex], Asset: asset})
+			matchedFiles[queryFileIndices[fileIndex]] = true
 		}
-		if !matched {
+	}
+	for fileIndex := range files {
+		if validFiles[fileIndex] && !matchedFiles[fileIndex] {
 			notFound++
 		}
 	}

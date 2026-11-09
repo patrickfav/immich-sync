@@ -10,6 +10,7 @@ import (
 	"os"
 	"path/filepath"
 	"strings"
+	"sync"
 	"sync/atomic"
 	"testing"
 	"time"
@@ -68,6 +69,144 @@ func TestTakeoutFilenameFromMetadata(t *testing.T) {
 				t.Fatalf("takeoutFilenameFromMetadata(%q) = %q, %t; want %q, %t", tt.name, got, ok, tt.want, tt.wantOkay)
 			}
 		})
+	}
+}
+
+func TestTakeoutFilenameCandidatesIncludeJPEGForTIFF(t *testing.T) {
+	tests := []struct {
+		name string
+		want []string
+	}{
+		{name: "photo.tif", want: []string{"photo.tif", "photo.jpg", "photo.jpeg"}},
+		{name: "photo.tiff", want: []string{"photo.tiff", "photo.jpg", "photo.jpeg"}},
+		{name: "photo.TIFF", want: []string{"photo.TIFF", "photo.jpg", "photo.jpeg"}},
+		{name: "photo.jpg", want: []string{"photo.jpg"}},
+	}
+
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			got := takeoutFilenameCandidates(tt.name)
+			if strings.Join(got, "\x00") != strings.Join(tt.want, "\x00") {
+				t.Fatalf("takeoutFilenameCandidates(%q) = %v, want %v", tt.name, got, tt.want)
+			}
+		})
+	}
+}
+
+func TestFindAlbumAssetMatchesTIFFWithJPEGAsset(t *testing.T) {
+	oldAPIURL, oldAPIKey, oldHTTPClient := apiURL, apiKey, httpClient
+	oldAssetSearchCache := assetSearchCache
+	t.Cleanup(func() {
+		apiURL, apiKey, httpClient = oldAPIURL, oldAPIKey, oldHTTPClient
+		assetSearchCache = oldAssetSearchCache
+	})
+
+	var mu sync.Mutex
+	searchedFilenames := make(map[string]struct{})
+	server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		var payload struct {
+			OriginalFileName string `json:"originalFileName"`
+		}
+		if err := json.NewDecoder(r.Body).Decode(&payload); err != nil {
+			t.Fatalf("decode search request: %v", err)
+		}
+		mu.Lock()
+		searchedFilenames[payload.OriginalFileName] = struct{}{}
+		mu.Unlock()
+		if payload.OriginalFileName == "photo.jpeg" {
+			_, _ = w.Write([]byte(`{"assets":{"total":1,"count":1,"items":[{"id":"jpeg-asset","originalFileName":"photo.jpeg"}]}}`))
+			return
+		}
+		_, _ = w.Write([]byte(`{"assets":{"total":0,"count":0,"items":[]}}`))
+	}))
+	defer server.Close()
+
+	apiURL = server.URL
+	apiKey = "test-key"
+	httpClient = server.Client()
+	assetSearchCache = nil
+
+	matches, notFound, err := findAlbumAssetMatches([]TakeoutFile{{
+		Filename:       "photo.tiff",
+		CreationTime:   "1700000000",
+		PhotoTakenTime: "1700000000",
+	}})
+	if err != nil {
+		t.Fatalf("findAlbumAssetMatches() returned an error: %v", err)
+	}
+	if notFound != 0 {
+		t.Fatalf("findAlbumAssetMatches() notFound = %d, want 0", notFound)
+	}
+	if len(matches) != 1 || matches[0].Asset.ID != "jpeg-asset" {
+		t.Fatalf("findAlbumAssetMatches() matches = %#v, want the JPEG asset", matches)
+	}
+	for _, filename := range []string{"photo.tiff", "photo.jpg", "photo.jpeg"} {
+		if _, ok := searchedFilenames[filename]; !ok {
+			t.Errorf("findAlbumAssetMatches() did not search for %q", filename)
+		}
+	}
+}
+
+func TestFindAlbumAssetMatchesUsesPhotoTakenTime(t *testing.T) {
+	oldAPIURL, oldAPIKey, oldHTTPClient := apiURL, apiKey, httpClient
+	oldAssetSearchCache := assetSearchCache
+	t.Cleanup(func() {
+		apiURL, apiKey, httpClient = oldAPIURL, oldAPIKey, oldHTTPClient
+		assetSearchCache = oldAssetSearchCache
+	})
+
+	var requestedAfter string
+	var requestedBefore string
+	server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		var payload struct {
+			TakenAfter  string `json:"takenAfter"`
+			TakenBefore string `json:"takenBefore"`
+		}
+		if err := json.NewDecoder(r.Body).Decode(&payload); err != nil {
+			t.Fatalf("decode search request: %v", err)
+		}
+		requestedAfter = payload.TakenAfter
+		requestedBefore = payload.TakenBefore
+		_, _ = w.Write([]byte(`{"assets":{"total":0,"count":0,"items":[]}}`))
+	}))
+	defer server.Close()
+
+	apiURL = server.URL
+	apiKey = "test-key"
+	httpClient = server.Client()
+	assetSearchCache = nil
+
+	_, notFound, err := findAlbumAssetMatches([]TakeoutFile{{
+		Filename:       "IMGP0169.JPG",
+		CreationTime:   "1702922780",
+		PhotoTakenTime: "1293213548",
+	}})
+	if err != nil {
+		t.Fatalf("findAlbumAssetMatches() returned an error: %v", err)
+	}
+	if notFound != 1 {
+		t.Fatalf("findAlbumAssetMatches() notFound = %d, want 1", notFound)
+	}
+	if requestedAfter != "2010-12-23T17:59:08Z" || requestedBefore != "2010-12-25T17:59:08Z" {
+		t.Fatalf("requested timestamp window = %q to %q, want a window around photoTakenTime", requestedAfter, requestedBefore)
+	}
+}
+
+func TestFindAlbumAssetMatchesDoesNotFallbackToCreationTime(t *testing.T) {
+	oldAssetSearchCache := assetSearchCache
+	t.Cleanup(func() { assetSearchCache = oldAssetSearchCache })
+	assetSearchCache = nil
+
+	matches, notFound, err := findAlbumAssetMatches([]TakeoutFile{{
+		Filename:       "photo.jpg",
+		CreationTime:   "1702922780",
+		PhotoTakenTime: "",
+	}})
+	if err != nil {
+		t.Fatalf("findAlbumAssetMatches() returned an error: %v", err)
+	}
+	if len(matches) != 0 || notFound != 1 {
+		t.Fatalf("findAlbumAssetMatches() = %d matches, %d not found; want 0 matches and 1 not found", len(matches), notFound)
 	}
 }
 
